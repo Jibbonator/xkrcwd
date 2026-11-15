@@ -1,0 +1,100 @@
+diff --git a/cmd/monitor64-agent/VERSION b/cmd/monitor64-agent/VERSION
+index d917d3e..b1e80bb 100644
+--- a/cmd/monitor64-agent/VERSION
++++ b/cmd/monitor64-agent/VERSION
+@@ -1 +1 @@
+-0.1.2
++0.1.3
+diff --git a/cmd/monitor64-agent/collector_freebsd.go b/cmd/monitor64-agent/collector_freebsd.go
+index d8df144..28095e3 100644
+--- a/cmd/monitor64-agent/collector_freebsd.go
++++ b/cmd/monitor64-agent/collector_freebsd.go
+@@ -13,7 +13,7 @@ import (
+ // bsdCollector liest die Werte ueber m64bsd (eigener Puffer fuer SMART/Updates/Neustart).
+ type bsdCollector struct{ cache *m64bsd.Cache }
+ 
+-func newCollector() m64agent.Collector { return &bsdCollector{cache: m64bsd.NewCache()} }
++func newCollector(root string) m64agent.Collector { return &bsdCollector{cache: m64bsd.NewCache()} }
+ 
+ func (c *bsdCollector) Collect(ctx context.Context, sections []string) *m64proto.Report {
+ 	return m64bsd.Collect(ctx, m64bsd.Options{Sections: sections, Cache: c.cache})
+diff --git a/cmd/monitor64-agent/collector_linux.go b/cmd/monitor64-agent/collector_linux.go
+index df0bbab..5fc40b2 100644
+--- a/cmd/monitor64-agent/collector_linux.go
++++ b/cmd/monitor64-agent/collector_linux.go
+@@ -11,14 +11,19 @@ import (
+ )
+ 
+ // linuxCollector liest die Werte ueber m64linux (eigener Puffer fuer SMART/Updates).
+-type linuxCollector struct{ cache *m64linux.Cache }
++type linuxCollector struct {
++	cache *m64linux.Cache
++	root  string
++}
+ 
+-func newCollector() m64agent.Collector { return &linuxCollector{cache: m64linux.NewCache()} }
++func newCollector(root string) m64agent.Collector {
++	return &linuxCollector{cache: m64linux.NewCache(), root: root}
++}
+ 
+ func (c *linuxCollector) Collect(ctx context.Context, sections []string) *m64proto.Report {
+-	return m64linux.Collect(ctx, m64linux.Options{Sections: sections, Cache: c.cache})
++	return m64linux.Collect(ctx, m64linux.Options{Sections: sections, Root: c.root, Cache: c.cache})
+ }
+ 
+ func (c *linuxCollector) Caps() []string {
+-	return m64linux.Caps(m64linux.Options{Cache: c.cache})
++	return m64linux.Caps(m64linux.Options{Root: c.root, Cache: c.cache})
+ }
+diff --git a/cmd/monitor64-agent/collector_other.go b/cmd/monitor64-agent/collector_other.go
+index 24a5e2b..852108c 100644
+--- a/cmd/monitor64-agent/collector_other.go
++++ b/cmd/monitor64-agent/collector_other.go
+@@ -5,4 +5,4 @@ package main
+ import "github.com/ipv64net/node64/internal/m64agent"
+ 
+ // newCollector: ausserhalb von Linux und Windows noch keine Werte (FreeBSD folgt).
+-func newCollector() m64agent.Collector { return nil }
++func newCollector(root string) m64agent.Collector { return nil }
+diff --git a/cmd/monitor64-agent/collector_windows.go b/cmd/monitor64-agent/collector_windows.go
+index 387d541..59fa7f1 100644
+--- a/cmd/monitor64-agent/collector_windows.go
++++ b/cmd/monitor64-agent/collector_windows.go
+@@ -13,7 +13,7 @@ import (
+ // windowsCollector liest die Werte ueber m64win (eigener Puffer fuer SMART/Storage Spaces/Updates).
+ type windowsCollector struct{ cache *m64win.Cache }
+ 
+-func newCollector() m64agent.Collector { return &windowsCollector{cache: m64win.NewCache()} }
++func newCollector(root string) m64agent.Collector { return &windowsCollector{cache: m64win.NewCache()} }
+ 
+ func (c *windowsCollector) Collect(ctx context.Context, sections []string) *m64proto.Report {
+ 	return m64win.Collect(ctx, m64win.Options{Sections: sections, Cache: c.cache})
+diff --git a/cmd/monitor64-agent/main.go b/cmd/monitor64-agent/main.go
+index cda7380..d982926 100644
+--- a/cmd/monitor64-agent/main.go
++++ b/cmd/monitor64-agent/main.go
+@@ -90,6 +90,7 @@ type runFlags struct {
+ 	port     int
+ 	listen   string
+ 	dir      string
++	root     string
+ 	keys     string
+ 	hostKey  string
+ 	localDir string
+@@ -107,6 +108,7 @@ func parseRunFlags(args []string, errOut io.Writer) (runFlags, error) {
+ 	fs.IntVar(&f.port, "port", m64proto.DefaultPort, "TCP port")
+ 	fs.StringVar(&f.listen, "listen", "", "listen address (default: all)")
+ 	fs.StringVar(&f.dir, "dir", defaultDir, "settings directory")
++	fs.StringVar(&f.root, "root", "", "root for /proc, /sys and mounts (default: /)")
+ 	fs.StringVar(&f.keys, "keys", "", "allowed keys (default: <dir>/keys)")
+ 	fs.StringVar(&f.hostKey, "hostkey", "", "host key (default: <dir>/hostkey)")
+ 	fs.StringVar(&f.localDir, "local", "", "local check scripts (default: <dir>/local.d)")
+@@ -208,7 +210,7 @@ func runAgent(exe string, args []string) int {
+ 		HostKey:     hk,
+ 		KeysFile:    f.keys,
+ 		LocalDir:    f.localDir,
+-		Collector:   newCollector(),
++		Collector:   newCollector(f.root),
+ 		Version:     Version,
+ 		ReleaseKeys: relKeys,
+ 		ExePath:     exe,

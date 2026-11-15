@@ -1,0 +1,35 @@
+name: Monitor64
+version: "0.1.2-8"
+slug: monitor64
+description: Monitor64-Agent (6465) und read-only Docker-Proxy (2376)
+arch:
+  - amd64
+  - aarch64
+  - armv7
+startup: system
+boot: auto
+host_pid: true
+host_network: true
+host_dbus: true
+full_access: true
+privileged:
+  - SYS_RAWIO
+  - SYS_ADMIN
+docker_api: true
+map:
+  - config:ro
+options:
+  keys: []
+  local_scripts: false
+  listen: ":2376"
+  docker_socket: "/var/run/docker.sock"
+  agent_port: 6465
+  agent_root: ""
+schema:
+  keys:
+    - str
+  local_scripts: bool
+  listen: str
+  docker_socket: str
+  agent_port: int
+  agent_root: str

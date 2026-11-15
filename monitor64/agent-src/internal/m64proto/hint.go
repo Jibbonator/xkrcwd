@@ -18,6 +18,7 @@ const (
 	HintFormat        = "{m64:format}"         // unbekanntes Format
 	HintNoSystemd     = "{m64:no_systemd}"     // kein systemd
 	HintNoPkgManager  = "{m64:no_pkg_manager}" // kein Paketverwalter erkannt
+	HintUpgradeLocked = "{m64:upgrade_locked}" // System verweigert Upgrades ueber den Paketverwalter (UGOS)
 	HintSecUnknown    = "{m64:sec_unknown}"    // Sicherheitsupdates unbekannt (danach ": " und der Grund)
 	HintNotParsable   = "{m64:not_parsable}"   // keine Auswertung moeglich
 	HintNoOutput      = "{m64:no_output}"      // keine Monitor64-Ausgabe
@@ -34,6 +35,7 @@ const (
 	HintNoRepo        = "{m64:no_repo}"        // keine Paketquelle eingeschaltet (FreeBSD)
 	HintNoVulnDB      = "{m64:no_vuln_db}"     // keine Schwachstellen-Datenbank (pkg audit -F)
 	HintNoDisks       = "{m64:no_disks}"       // keine Platten gefunden (Windows)
+	HintPacmanLocal   = "{m64:pacman_local}"   // pacman -Qu ohne checkupdates: nur gegen die lokale Paketliste (#158)
 
 	HintCountersUnreadable = "{m64:counters_unreadable}" // Zuverlaessigkeitszaehler nicht lesbar (Administratorrechte noetig?)
 )

@@ -36,6 +36,20 @@ func ParseMounts(b []byte) []Mount {
 	return out
 }
 
+// HostReadOnly uebernimmt "nur lesbar" je Mount-Punkt aus der Mount-Liste des Hosts (Namensraum von PID 1). Der
+// letzte Eintrag je Mount-Punkt gilt (darueber gehaengte Dateisysteme); Mounts, die der Host nicht kennt, bleiben.
+func HostReadOnly(own, host []Mount) {
+	ro := map[string]bool{}
+	for _, m := range host {
+		ro[m.Mount] = m.ReadOnly
+	}
+	for i := range own {
+		if v, ok := ro[own[i].Mount]; ok {
+			own[i].ReadOnly = v
+		}
+	}
+}
+
 // unescapeMount loest die Oktal-Escapes aus /proc/mounts auf (\040 Leerzeichen, \011 Tab, \012, \134).
 func unescapeMount(s string) string {
 	if !strings.Contains(s, `\`) {
@@ -92,13 +106,25 @@ func SkipMount(m Mount) bool {
 	return false
 }
 
-// DedupFS behaelt je Geraet nur einen Mount (Bind-Mounts, btrfs-Subvolumes): den kuerzesten Pfad.
+// genericFSSource: Quelle, die kein Geraet bezeichnet – leer, "none", "nodev" oder "-" (z. B. virtiofs-Mounts ohne
+// eigenen Namen). Mehrere solche Mounts sind verschiedene Dateisysteme und duerfen nicht zusammenfallen (#140). Eine
+// Quelle wie "shfs" (Unraid /mnt/user und /mnt/user0) bleibt eine Kennung.
+func genericFSSource(dev string) bool {
+	switch strings.ToLower(strings.TrimSpace(dev)) {
+	case "", "none", "nodev", "-":
+		return true
+	}
+	return false
+}
+
+// DedupFS behaelt je Geraet nur einen Mount (Bind-Mounts, btrfs-Subvolumes): den kuerzesten Pfad. Mounts mit
+// generischer Quelle (genericFSSource) bleiben je Pfad einzeln.
 func DedupFS(in []m64proto.FS) []m64proto.FS {
 	idx := map[string]int{}
 	var out []m64proto.FS
 	for _, f := range in {
 		key := f.Device
-		if key == "" {
+		if genericFSSource(f.Device) {
 			key = "mount:" + f.Mount
 		}
 		if i, ok := idx[key]; ok {

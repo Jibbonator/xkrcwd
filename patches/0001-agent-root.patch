@@ -1,10 +1,3 @@
-diff --git a/cmd/monitor64-agent/VERSION b/cmd/monitor64-agent/VERSION
-index d917d3e..b1e80bb 100644
---- a/cmd/monitor64-agent/VERSION
-+++ b/cmd/monitor64-agent/VERSION
-@@ -1 +1 @@
--0.1.2
-+0.1.3
 diff --git a/cmd/monitor64-agent/collector_freebsd.go b/cmd/monitor64-agent/collector_freebsd.go
 index d8df144..28095e3 100644
 --- a/cmd/monitor64-agent/collector_freebsd.go

@@ -211,6 +211,34 @@ type SMART struct {
 	MediaErrors     *uint64  `json:"media_err,omitempty"` // NVMe
 	CriticalWarning *uint64  `json:"crit_warn,omitempty"` // NVMe (Bitfeld)
 	Error           string   `json:"error,omitempty"`     // Platte nicht lesbar (z. B. USB-Bridge ohne SMART)
+	// Alle gelesenen Werte zum Nachschlagen (Agent ab 0.1.4; die Node zeigt sie als Dialog, wertet sie nicht aus)
+	Firmware string       `json:"fw,omitempty"`
+	ReadAt   int64        `json:"at,omitempty"`    // Unix-Sekunden: wann gelesen (der Agent puffert SMART)
+	Attrs    []SMARTAttr  `json:"attrs,omitempty"` // ATA-Attribute
+	Values   []SMARTValue `json:"vals,omitempty"`  // NVMe-/SCSI-Werte
+}
+
+// MaxSmartRows begrenzt Attribute bzw. Werte je Platte.
+const MaxSmartRows = 64
+
+// SMARTAttr ist ein ATA-Attribut (normierte Werte; Thresh 0 = keine Schwelle).
+type SMARTAttr struct {
+	ID     int    `json:"id"`
+	Name   string `json:"name,omitempty"`
+	Value  int    `json:"v"`
+	Worst  int    `json:"w"`
+	Thresh int    `json:"t"`
+	Raw    string `json:"raw,omitempty"`
+	Fail   string `json:"fail,omitempty"` // "now", "past"
+}
+
+// SMARTValue ist ein benannter Wert (Key wie in smartctl -j, z. B. available_spare): Zahl mit Einheit (%, °C, B,
+// h, min, hex) oder Text.
+type SMARTValue struct {
+	Key   string  `json:"k"`
+	Value float64 `json:"v"`
+	Unit  string  `json:"u,omitempty"`
+	Text  string  `json:"t,omitempty"`
 }
 
 // RAID ist ein mdraid-Verbund (bzw. Synology/QNAP per SNMP).
@@ -294,6 +322,9 @@ type Updates struct {
 type Reboot struct {
 	Required bool     `json:"required"`
 	Packages []string `json:"pkgs,omitempty"`
+	// Linux: laufender Kernel und neuester installierter derselben Variante, wenn sie abweichen (Agent ab 0.1.5)
+	KernelRunning string `json:"kern_run,omitempty"`
+	KernelNewest  string `json:"kern_new,omitempty"`
 }
 
 // LocalCheck ist eine Zeile eines eigenen Skripts im Format der CheckMK-"local checks":

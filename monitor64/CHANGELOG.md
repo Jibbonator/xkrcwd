@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.2-9
+
+- Eingebetteten Agenten auf Upstream-Stand 1.7.0 gezogen (Agent 0.1.6), Patch für den
+  Agent-Root gegen 0.1.6 neu erzeugt. Proxy und Optionen unverändert.
+
+## 0.1.2-8
+
+- Erste Veröffentlichung unter der neuen Repository-Adresse; inhaltlich unverändert
+  gegenüber 0.1.2-7.
+
 ## 0.1.2-7
 
 - Image auf Debian bookworm-slim umgestellt, `systemd` (systemctl) mit installiert;

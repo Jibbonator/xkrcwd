@@ -1,0 +1,393 @@
+package cdn64
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"io"
+	"maps"
+	"net/netip"
+	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/ipv64net/node64/internal/dns64/localnet"
+	"github.com/ipv64net/node64/internal/geoip"
+	"github.com/ipv64net/node64/internal/shield"
+)
+
+// Laendersperre je Host und Stream: Besucher aus bestimmten Laendern sperren oder nur sie zulassen. Entschieden wird nach dem
+// Standort der Adresse (Laenderdaten von ipv64.net nach DB-IP, internal/geoip, wie bei Honeypot64; #139): AWS/Azure Frankfurt
+// oder Firmennetze, die bei ARIN registriert sind, aber in Deutschland stehen, gelten so als DE. Die Standortdaten werden
+// geladen, solange ein eingeschalteter Host oder Stream die Laendersperre nutzt. Nur fuer Adressen ohne Standort (Daten noch
+// nicht geladen oder Adresse unbekannt) gelten als Rueckfall die Laenderlisten von ipv64.net (taeglich aus den Daten der
+// Registrierungsstellen, dazu die Ausgangsadressen von Apple iCloud Private Relay mit Apples Land, #54); sie werden nur fuer
+// Laender geladen, die ein eingeschalteter Host oder Stream benutzt; Zwischenspeicher wie bei den Blocklisten. Private Netze,
+// CGNAT und die Ausnahmen der Blocklisten werden nie gesperrt. "Nur zulassen" sperrt ohne Standort erst, wenn alle Listen
+// geladen sind.
+
+const (
+	geoBlock  = "block" // Laender sperren
+	geoAllow  = "allow" // nur diese Laender zulassen
+	geoMax    = 60      // Laender je Host
+	geoMaxRaw = 16 << 20
+	rejGeo    = "geo" // Laendersperre
+)
+
+var errNoAddr = errors.New("no addresses in the list")
+
+var (
+	geoCodeRe = regexp.MustCompile(`^[A-Z]{2}$`)
+	cgnat     = netip.MustParsePrefix("100.64.0.0/10")
+)
+
+// GeoState ist der Stand einer Laenderliste (fuer Seite und API).
+type GeoState struct {
+	Code    string    `json:"code"`
+	Entries int64     `json:"entries"`
+	Updated time.Time `json:"updated,omitzero"`
+	Error   string    `json:"error,omitempty"`
+}
+
+// geoLocate: Land einer Adresse nach Standort (Tests ersetzen es); ok = false ohne Daten bzw. fuer unbekannte Adressen.
+var geoLocate = geoip.Lookup
+
+// geoDataStart fordert die Standortdaten an (Tests ersetzen es); die gelieferte Funktion gibt sie zurueck.
+var geoDataStart = geoip.Start
+
+// geoSets: geladene Laenderlisten.
+type geoSets struct {
+	mu      sync.RWMutex
+	sets    map[string]*shield.Set
+	state   map[string]*GeoState
+	need    []string       // Laender der eingeschalteten Hosts und Streams
+	allow   []netip.Prefix // Ausnahmen der Blocklisten
+	blocked atomic.Int64   // abgewiesen seit dem Start
+
+	needBy map[string][]string // Laender je Quelle ("hosts", "streams")
+
+	dataMu      sync.Mutex
+	dataRelease func() // Standortdaten angefordert (geoDataStart), nil = nicht
+}
+
+// normalizeGeo prueft Modus und Laender (Grossbuchstaben, ohne Doppelte); ohne Modus keine Laender.
+func (a *Advanced) normalizeGeo() error { return normalizeGeo(&a.GeoMode, &a.GeoCountries) }
+
+// geoEU: die 27 Mitgliedstaaten der EU (Kuerzel EU in der Laendersperre).
+var geoEU = []string{"AT", "BE", "BG", "CY", "CZ", "DE", "DK", "EE", "ES", "FI", "FR", "GR", "HR", "HU", "IE", "IT", "LT", "LU", "LV", "MT", "NL", "PL", "PT", "RO", "SE", "SI", "SK"}
+
+func normalizeGeo(mode *string, countries *[]string) error {
+	if *mode != geoBlock && *mode != geoAllow {
+		*mode, *countries = "", nil
+		return nil
+	}
+	var out []string
+	var in []string
+	for _, c := range *countries { // EU steht fuer die 27 Mitgliedstaaten (#54)
+		if strings.EqualFold(strings.TrimSpace(c), "EU") {
+			in = append(in, geoEU...)
+			continue
+		}
+		in = append(in, c)
+	}
+	for _, c := range in {
+		c = strings.ToUpper(strings.TrimSpace(c))
+		if c == "" || slices.Contains(out, c) {
+			continue
+		}
+		if !geoCodeRe.MatchString(c) {
+			return &FieldError{Field: "geo", Key: "cdn64.err.geo_country", Name: c}
+		}
+		out = append(out, c)
+	}
+	if len(out) == 0 {
+		return ferr("geo", "cdn64.err.geo_none")
+	}
+	if len(out) > geoMax {
+		return ferr("geo", "cdn64.err.geo_many")
+	}
+	*countries = out
+	return nil
+}
+
+// geoBlocked: Besucher ip wird von der Laendersperre des Hosts abgewiesen (zaehlt mit).
+func (m *Module) geoBlocked(a *Advanced, ip netip.Addr) bool {
+	return m.geoBlockedBy(a.GeoMode, a.GeoCountries, ip)
+}
+
+// geoBlockedBy: wie geoBlocked, fuer Modus und Laender eines Hosts oder Streams.
+func (m *Module) geoBlockedBy(mode string, countries []string, ip netip.Addr) bool {
+	if mode == "" {
+		return false
+	}
+	ip = ip.Unmap()
+	g := &m.bl.geo
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	// Ausnahmen zuerst: Wer ein Netz ausdruecklich freigibt (z. B. das Docker-Netz), meint auch das Gateway darin
+	// (Forum 5189 - vorher wies "nur zulassen" das Gateway trotz Ausnahme ab)
+	for _, p := range g.allow {
+		if ip.IsValid() && p.Contains(ip) {
+			return false
+		}
+	}
+	if !ip.IsValid() || localnet.MaskedGateway(ip) { // Herkunft unbekannt (Docker-Gateway): "nur zulassen" sperrt
+		if mode == geoAllow {
+			g.blocked.Add(1)
+			return true
+		}
+		return false
+	}
+	if !ip.IsGlobalUnicast() || ip.IsPrivate() || cgnat.Contains(ip) {
+		return false
+	}
+	if cc, ok := geoLocate(ip); ok { // Standort bekannt: nur er zaehlt (#139)
+		block := slices.Contains(countries, cc)
+		if mode == geoAllow {
+			block = !block
+		}
+		if block {
+			g.blocked.Add(1)
+		}
+		return block
+	}
+	in, missing := false, false // ohne Standort: Listen nach Registrierungsland
+	for _, c := range countries {
+		s := g.sets[c]
+		if s == nil {
+			missing = true // Liste (noch) nicht geladen
+			continue
+		}
+		if s.Has(ip) {
+			in = true
+			break
+		}
+	}
+	block := in
+	if mode == geoAllow { // nur zulassen: sperren erst, wenn alle Listen da sind (sonst traefe es erlaubte Laender)
+		block = !in && !missing && len(countries) > 0
+	}
+	if block {
+		g.blocked.Add(1)
+	}
+	return block
+}
+
+// geoNeed merkt sich die Laender der eingeschalteten Hosts (bei jedem apply); fehlt eine Liste, wird geladen.
+func (m *Module) geoNeed(active []*Host) {
+	var codes []string
+	for _, h := range active {
+		if h.Advanced.GeoMode != "" {
+			codes = append(codes, h.Advanced.GeoCountries...)
+		}
+	}
+	m.geoNeedFrom("hosts", codes)
+}
+
+// geoNeedStreams: dasselbe fuer die eingeschalteten Streams (bei jedem applyStreams).
+func (m *Module) geoNeedStreams(active []*Stream) {
+	var codes []string
+	for _, s := range active {
+		if s.GeoMode != "" {
+			codes = append(codes, s.GeoCountries...)
+		}
+	}
+	m.geoNeedFrom("streams", codes)
+}
+
+func (m *Module) geoNeedFrom(src string, codes []string) {
+	g := &m.bl.geo
+	g.mu.Lock()
+	if g.needBy == nil {
+		g.needBy = map[string][]string{}
+	}
+	g.needBy[src] = codes
+	var need []string
+	for _, list := range g.needBy {
+		for _, c := range list {
+			if !slices.Contains(need, c) {
+				need = append(need, c)
+			}
+		}
+	}
+	slices.Sort(need)
+	g.need = need
+	missing := false
+	for _, c := range need {
+		if g.sets[c] == nil {
+			missing = true
+		}
+	}
+	g.mu.Unlock()
+	m.geoData(len(need) > 0)
+	if missing {
+		select {
+		case m.bl.kick <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// geoData fordert die Standortdaten an bzw. gibt sie zurueck (on = mindestens ein Host oder Stream mit Laendersperre).
+// Ohne Datenverzeichnis (Tests) nie.
+func (m *Module) geoData(on bool) {
+	g := &m.bl.geo
+	g.dataMu.Lock()
+	defer g.dataMu.Unlock()
+	switch {
+	case on && g.dataRelease == nil && m.dataDir != "":
+		g.dataRelease = geoDataStart(m.dataDir, "Node64/"+m.version, m.log)
+	case !on && g.dataRelease != nil:
+		g.dataRelease()
+		g.dataRelease = nil
+	}
+}
+
+// geoSource: Land einer Adresse und woher es kommt ("location" = Standort nach DB-IP, "registry" = Liste nach
+// Registrierungsland, "" = keins), fuer die Abfrage in der API.
+func (m *Module) geoSource(ip netip.Addr) (cc, source string) {
+	ip = ip.Unmap()
+	if cc, ok := geoLocate(ip); ok {
+		return cc, "location"
+	}
+	g := &m.bl.geo
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	codes := slices.Sorted(maps.Keys(g.sets)) // nur die geladenen Listen (Laender der Hosts und Streams)
+	for _, c := range codes {
+		if g.sets[c].Has(ip) {
+			return c, "registry"
+		}
+	}
+	return "", ""
+}
+
+func (m *Module) geoNeeded() []string {
+	g := &m.bl.geo
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return slices.Clone(g.need)
+}
+
+func (g *geoSets) put(code string, nets []netip.Prefix, changed time.Time) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.sets == nil {
+		g.sets, g.state = map[string]*shield.Set{}, map[string]*GeoState{}
+	}
+	g.sets[code] = shield.BuildSet([][]netip.Prefix{nets}, nil)
+	g.state[code] = &GeoState{Code: code, Entries: int64(len(nets)), Updated: changed}
+}
+
+// geoLoadCache: zwischengespeicherte Laenderlisten (beim Start).
+func (m *Module) geoLoadCache(ctx context.Context) {
+	dir := m.blCacheDir()
+	if dir == "" {
+		return
+	}
+	if list, err := m.hosts(ctx); err == nil {
+		var active []*Host
+		for _, h := range list {
+			if h.Enabled {
+				active = append(active, h)
+			}
+		}
+		m.geoNeed(active)
+	}
+	if list, err := m.streams(ctx); err == nil {
+		var active []*Stream
+		for _, s := range list {
+			if s.Enabled {
+				active = append(active, s)
+			}
+		}
+		m.geoNeedStreams(active)
+	}
+	for _, c := range m.geoNeeded() {
+		p := filepath.Join(dir, "countries", c+".txt")
+		f, err := os.Open(p)
+		if err != nil {
+			continue
+		}
+		nets, err := shield.ParseList(io.LimitReader(f, geoMaxRaw))
+		fi, _ := f.Stat()
+		f.Close()
+		if err == nil && len(nets) > 0 && fi != nil {
+			m.bl.geo.put(c, nets, fi.ModTime())
+		}
+	}
+}
+
+// geoRefresh laedt die benoetigten Laenderlisten (nur bei Aenderung) und wirft nicht mehr benoetigte weg.
+func (m *Module) geoRefresh(ctx context.Context) {
+	need := m.geoNeeded()
+	g := &m.bl.geo
+	for _, c := range need {
+		g.mu.RLock()
+		have := g.sets[c] != nil
+		g.mu.RUnlock()
+		raw, same, err := m.blGet(ctx, "countries/ipv64_blocklist_"+c+".txt", "geo:"+c, have, geoMaxRaw)
+		if err == nil && !same {
+			var nets []netip.Prefix
+			if nets, err = shield.ParseList(bytes.NewReader(raw)); err == nil {
+				if len(nets) == 0 {
+					err = errNoAddr
+				} else {
+					m.blCacheWrite("countries/"+c+".txt", raw)
+					g.put(c, nets, time.Now())
+				}
+			}
+		}
+		if err != nil && ctx.Err() == nil {
+			m.log.Warn("cdn64 country list not loaded", "country", c, "err", err)
+			g.mu.Lock()
+			if g.state == nil {
+				g.sets, g.state = map[string]*shield.Set{}, map[string]*GeoState{}
+			}
+			if st := g.state[c]; st != nil {
+				st.Error = err.Error()
+			} else {
+				g.state[c] = &GeoState{Code: c, Error: err.Error()}
+			}
+			g.mu.Unlock()
+		} else if err == nil {
+			g.mu.Lock()
+			if st := g.state[c]; st != nil {
+				st.Error = ""
+				if same {
+					st.Updated = time.Now()
+				}
+			}
+			g.mu.Unlock()
+		}
+	}
+	g.mu.Lock()
+	for c := range g.sets {
+		if !slices.Contains(g.need, c) { // aktueller Stand (ein Host kann waehrend des Ladens dazugekommen sein)
+			delete(g.sets, c)
+			delete(g.state, c)
+		}
+	}
+	g.mu.Unlock()
+}
+
+// geoStates liefert den Stand der geladenen Laenderlisten.
+func (m *Module) geoStates() []GeoState {
+	g := &m.bl.geo
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	out := []GeoState{}
+	for _, c := range g.need {
+		if st := g.state[c]; st != nil {
+			out = append(out, *st)
+		} else {
+			out = append(out, GeoState{Code: c})
+		}
+	}
+	return out
+}

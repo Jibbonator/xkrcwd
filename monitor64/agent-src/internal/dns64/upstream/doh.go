@@ -1,0 +1,513 @@
+// Package upstream forwards DNS queries encrypted: DNS-over-HTTPS (RFC 8484, https://), DNS-over-TLS
+// (RFC 7858, tls://host[:853]) and DNS-over-QUIC (RFC 9250, quic://host[:853]).
+package upstream
+
+import (
+	"bytes"
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/miekg/dns"
+)
+
+type Server struct {
+	Name string `json:"name"`
+	URL  string `json:"url"`
+	// Bootstrap IPs for the URL's host. Without them we would need DNS to
+	// reach our DNS upstream - a loop when this machine uses itself as resolver.
+	IPs []string `json:"ips"`
+}
+
+// Default: Cloudflare and Quad9 (DoH) plus dnsforge (DoQ and DoH, servers in Germany).
+var DefaultServers = []Server{preset("https://cloudflare-dns.com/dns-query"), preset("https://dns.quad9.net/dns-query"),
+	preset("quic://blank.dnsforge.de"), preset("https://blank.dnsforge.de/dns-query")}
+
+// Retired are presets that were removed (Mullvad shut its public DNS down, #162): saved settings drop them unless
+// they are switched on - then they stay as an own upstream until the user removes them.
+var Retired = map[string]bool{
+	"https://dns.mullvad.net/dns-query": true,
+	"tls://dns.mullvad.net":             true,
+}
+
+// preset is the preset with this URL (panics at start-up if the list and the defaults disagree).
+func preset(url string) Server {
+	for _, p := range Presets {
+		if p.URL == url {
+			return p
+		}
+	}
+	panic("upstream: no preset " + url)
+}
+
+// Presets are the public resolvers offered in the settings (IPv4 first: without IPv6 the v6 addresses fail fast).
+var Presets = []Server{
+	{Name: "Cloudflare", URL: "https://cloudflare-dns.com/dns-query", IPs: []string{"1.1.1.1", "1.0.0.1", "2606:4700:4700::1111", "2606:4700:4700::1001"}},
+	{Name: "Quad9", URL: "https://dns.quad9.net/dns-query", IPs: []string{"9.9.9.9", "149.112.112.112", "2620:fe::fe", "2620:fe::9"}},
+	{Name: "Google", URL: "https://dns.google/dns-query", IPs: []string{"8.8.8.8", "8.8.4.4", "2001:4860:4860::8888", "2001:4860:4860::8844"}},
+	{Name: "AdGuard", URL: "https://dns.adguard-dns.com/dns-query", IPs: []string{"94.140.14.14", "94.140.15.15", "2a10:50c0::ad1:ff", "2a10:50c0::ad2:ff"}},
+	{Name: "Cloudflare", URL: "tls://one.one.one.one", IPs: []string{"1.1.1.1", "1.0.0.1", "2606:4700:4700::1111", "2606:4700:4700::1001"}},
+	{Name: "Quad9", URL: "tls://dns.quad9.net", IPs: []string{"9.9.9.9", "149.112.112.112", "2620:fe::fe", "2620:fe::9"}},
+	{Name: "Google", URL: "tls://dns.google", IPs: []string{"8.8.8.8", "8.8.4.4", "2001:4860:4860::8888", "2001:4860:4860::8844"}},
+	{Name: "AdGuard", URL: "tls://dns.adguard-dns.com", IPs: []string{"94.140.14.14", "94.140.15.15", "2a10:50c0::ad1:ff", "2a10:50c0::ad2:ff"}},
+	{Name: "AdGuard", URL: "quic://dns.adguard-dns.com", IPs: []string{"94.140.14.14", "94.140.15.15", "2a10:50c0::ad1:ff", "2a10:50c0::ad2:ff"}},
+	// European resolvers, unfiltered variants (DNS64 filters itself): DNS4EU (Whalebone, CZ, EU-funded),
+	// dnsforge "Blank" (adminForge, DE), Freifunk München (DE, PoP in Vienna), Digitalcourage (DE, DoT only).
+	{Name: "DNS4EU", URL: "https://unfiltered.joindns4.eu/dns-query", IPs: []string{"86.54.11.100", "86.54.11.200", "2a13:1001::86:54:11:100", "2a13:1001::86:54:11:200"}},
+	{Name: "dnsforge", URL: "https://blank.dnsforge.de/dns-query", IPs: []string{"138.199.149.249", "78.47.71.194", "2a01:4f8:c17:7aa5::249", "2a01:4f8:c013:aae9::194"}},
+	{Name: "Freifunk München", URL: "https://doh.ffmuc.net/dns-query", IPs: []string{"5.1.66.255", "185.150.99.255", "2001:678:e68:f000::", "2001:678:ed0:f000::"}},
+	{Name: "DNS4EU", URL: "tls://unfiltered.joindns4.eu", IPs: []string{"86.54.11.100", "86.54.11.200", "2a13:1001::86:54:11:100", "2a13:1001::86:54:11:200"}},
+	{Name: "dnsforge", URL: "tls://blank.dnsforge.de", IPs: []string{"138.199.149.249", "78.47.71.194", "2a01:4f8:c17:7aa5::249", "2a01:4f8:c013:aae9::194"}},
+	{Name: "dnsforge", URL: "quic://blank.dnsforge.de", IPs: []string{"138.199.149.249", "78.47.71.194", "2a01:4f8:c17:7aa5::249", "2a01:4f8:c013:aae9::194"}},
+	{Name: "Freifunk München", URL: "tls://dot.ffmuc.net", IPs: []string{"5.1.66.255", "185.150.99.255", "2001:678:e68:f000::", "2001:678:ed0:f000::"}},
+	{Name: "Freifunk München", URL: "quic://doq.ffmuc.net", IPs: []string{"5.1.66.255", "185.150.99.255", "2001:678:e68:f000::", "2001:678:ed0:f000::"}},
+	{Name: "Digitalcourage", URL: "tls://dns3.digitalcourage.de", IPs: []string{"5.9.164.112", "2a01:4f8:251:554::2"}},
+}
+
+// Proto is the transport of an upstream URL: doh, dot or doq ("" = not supported).
+func Proto(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	switch u.Scheme {
+	case "https":
+		return "doh"
+	case "tls":
+		return "dot"
+	case "quic":
+		return "doq"
+	case "dns": // klassisch, nur fuer Weiterleitungen (plain.go)
+		return "dns"
+	}
+	return ""
+}
+
+// Modes: parallel = all at once, fastest valid answer wins; ordered = one after another, next on error;
+// fastest = only the currently fastest few at once (measured continuously, see fastest.go).
+const (
+	ModeParallel = "parallel"
+	ModeOrdered  = "ordered"
+	ModeFastest  = "fastest"
+)
+
+const attemptTimeout = 3 * time.Second
+
+// Pause im Modus der Reihe nach (#37): nach breakAfter Fehlern in Folge (auch REFUSED) wird ein Upstream uebersprungen
+// und nur noch als Letzter gefragt, zuerst breakMin, bei anhaltendem Ausfall doppelt so lange bis breakMax. Nach der
+// Pause prueft eine Anfrage im Hintergrund, ob er wieder antwortet - echte Anfragen warten nicht auf ihn.
+const (
+	breakAfter = 3
+	breakMin   = 30 * time.Second
+	breakMax   = 5 * time.Minute
+)
+
+// errRefused: Antwort REFUSED zaehlt als Fehler des Upstreams (z. B. falsche access-control beim eigenen Resolver).
+var errRefused = errors.New("refused")
+
+// testRoots replaces the system CAs in tests (nil = system).
+var testRoots *x509.CertPool
+
+// doh is one upstream with its statistics; client is used for DoH, ex for DoT and DoQ.
+type doh struct {
+	Server
+	client *http.Client
+	ex     exchanger
+
+	mu        sync.Mutex
+	requests  uint64
+	wins      uint64
+	errors    uint64
+	avgMs     float64 // exponentially weighted moving average
+	recentMs  float64 // faster moving average for the ranking (fastest mode)
+	lastUsed  time.Time
+	lastErr   string
+	lastErrAt time.Time
+	lastOKAt  time.Time
+	fails     int           // Fehler in Folge
+	backoff   time.Duration // aktuelle Pause
+	skipUntil time.Time     // pausiert bis (Modus der Reihe nach)
+	probing   bool          // Pruefung im Hintergrund laeuft
+}
+
+// Resolver races every query against all upstreams in parallel and returns
+// the first good answer. That hides the latency spikes of a single provider
+// and gives instant failover.
+type Resolver struct {
+	ups  []*doh
+	mode string
+	top  int // fastest mode: how many upstreams are asked at once
+}
+
+func New(servers []Server, mode string) *Resolver {
+	if mode != ModeOrdered && mode != ModeFastest {
+		mode = ModeParallel
+	}
+	r := &Resolver{mode: mode, top: DefaultTop}
+	for _, s := range servers {
+		u := &doh{Server: s}
+		pu, _ := url.Parse(s.URL)
+		port := "853"
+		if pu != nil && pu.Port() != "" {
+			port = pu.Port()
+		}
+		switch Proto(s.URL) {
+		case "dot":
+			u.ex = newDoT(pu.Hostname(), port, s.IPs)
+		case "doq":
+			u.ex = newDoQ(pu.Hostname(), port, s.IPs)
+		case "dns":
+			u.ex = newPlain(pu.Hostname(), pu.Port())
+		default:
+			u.client = newClient(s.IPs)
+		}
+		r.ups = append(r.ups, u)
+	}
+	return r
+}
+
+func newClient(ips []string) *http.Client {
+	dialer := &net.Dialer{Timeout: 2 * time.Second, KeepAlive: 30 * time.Second}
+	var pref atomic.Int32 // Familie der letzten erfolgreichen Verbindung (Happy Eyeballs)
+	tr := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			_, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, err
+			}
+			if len(ips) == 0 { // URL with an IP as host
+				return dialer.DialContext(ctx, network, addr)
+			}
+			addrs := make([]string, 0, len(ips))
+			for _, ip := range ips {
+				addrs = append(addrs, net.JoinHostPort(ip, port))
+			}
+			return happyDial(ctx, addrs, &pref, func(ctx context.Context, a string) (net.Conn, error) {
+				return dialer.DialContext(ctx, network, a)
+			}, func(c net.Conn) { _ = c.Close() })
+		},
+		ForceAttemptHTTP2:   true,
+		MaxIdleConns:        16,
+		MaxIdleConnsPerHost: 16,
+		IdleConnTimeout:     5 * time.Minute,
+		TLSHandshakeTimeout: 3 * time.Second,
+		TLSClientConfig:     &tls.Config{RootCAs: testRoots, MinVersion: tls.VersionTLS12},
+	}
+	return &http.Client{Transport: tr}
+}
+
+// Close drops the idle connections to the upstreams (and their goroutines).
+func (r *Resolver) Close() {
+	for _, u := range r.ups {
+		if u.ex != nil {
+			u.ex.close()
+		} else {
+			u.client.CloseIdleConnections()
+		}
+	}
+}
+
+// Exchange resolves req and returns the response and the name of the
+// upstream that answered first. A SERVFAIL is only used if no upstream
+// has anything better.
+func (r *Resolver) Exchange(ctx context.Context, req *dns.Msg) (*dns.Msg, string, error) {
+	switch r.mode {
+	case ModeOrdered:
+		return r.exchangeOrdered(ctx, req)
+	case ModeFastest:
+		return r.exchangeFastest(ctx, req)
+	}
+	return r.race(ctx, req, r.ups, nil, 0)
+}
+
+// race asks first at once; rest are reserves: after hedge (0 = never) the next one joins, and when everything
+// started so far failed (error or SERVFAIL), all remaining ones are asked.
+func (r *Resolver) race(ctx context.Context, req *dns.Msg, first, rest []*doh, hedge time.Duration) (*dns.Msg, string, error) {
+	type result struct {
+		resp *dns.Msg
+		u    *doh
+		err  error
+	}
+	ch := make(chan result, len(first)+len(rest))
+	pending := 0
+	launch := func(ups []*doh) {
+		for _, u := range ups {
+			q := req.Copy()
+			pending++
+			u.use()
+			go func() {
+				// Losers keep running to completion so their latency is measured;
+				// the buffered channel lets them finish without a reader.
+				actx, cancel := context.WithTimeout(context.Background(), attemptTimeout)
+				defer cancel()
+				start := time.Now()
+				resp, err := u.exchange(actx, q)
+				u.record(time.Since(start), refusedErr(resp, err), false)
+				ch <- result{resp, u, err}
+			}()
+		}
+	}
+	launch(first)
+	var timer <-chan time.Time
+	if hedge > 0 && len(rest) > 0 {
+		t := time.NewTimer(hedge)
+		defer t.Stop()
+		timer = t.C
+	}
+
+	var errs []error
+	var fallback *result
+	for pending > 0 {
+		select {
+		case res := <-ch:
+			pending--
+			switch {
+			case res.err != nil:
+				errs = append(errs, fmt.Errorf("%s: %w", res.u.Name, res.err))
+			case res.resp.Rcode == dns.RcodeServerFailure || res.resp.Rcode == dns.RcodeRefused:
+				if fallback == nil {
+					fallback = &res
+				}
+			default:
+				res.u.win()
+				return res.resp, res.u.Name, nil
+			}
+			if pending == 0 && len(rest) > 0 { // alle bisherigen gescheitert: alle Reserven
+				launch(rest)
+				rest, timer = nil, nil
+			}
+		case <-timer: // langsam: die naechste Reserve dazu
+			launch(rest[:1])
+			rest, timer = rest[1:], nil
+		case <-ctx.Done():
+			return nil, "", ctx.Err()
+		}
+	}
+	if fallback != nil {
+		fallback.u.win()
+		return fallback.resp, fallback.u.Name, nil
+	}
+	return nil, "", errors.Join(errs...)
+}
+
+// Mode is parallel or ordered.
+func (r *Resolver) Mode() string { return r.mode }
+
+// exchangeOrdered asks the upstreams one after another; the next one only on an error, SERVFAIL or REFUSED.
+// Pausierte Upstreams kommen zuletzt dran (orderedUps).
+func (r *Resolver) exchangeOrdered(ctx context.Context, req *dns.Msg) (*dns.Msg, string, error) {
+	var errs []error
+	var fallback *dns.Msg
+	var fallbackUp *doh
+	for _, u := range r.orderedUps(req) {
+		if ctx.Err() != nil {
+			break
+		}
+		actx, cancel := context.WithTimeout(ctx, attemptTimeout)
+		start := time.Now()
+		resp, err := u.exchange(actx, req.Copy())
+		cancel()
+		u.record(time.Since(start), refusedErr(resp, err), false)
+		switch {
+		case err != nil:
+			errs = append(errs, fmt.Errorf("%s: %w", u.Name, err))
+		case resp.Rcode == dns.RcodeServerFailure || resp.Rcode == dns.RcodeRefused:
+			if fallback == nil {
+				fallback, fallbackUp = resp, u
+			}
+		default:
+			u.win()
+			return resp, u.Name, nil
+		}
+	}
+	if fallback != nil {
+		fallbackUp.win()
+		return fallback, fallbackUp.Name, nil
+	}
+	if len(errs) == 0 {
+		return nil, "", ctx.Err()
+	}
+	return nil, "", errors.Join(errs...)
+}
+
+// orderedUps: Reihenfolge fuer den Modus der Reihe nach - pausierte Upstreams ans Ende; ist die Pause eines
+// Upstreams vorbei, prueft ihn req im Hintergrund (bis dahin bleibt er hinten).
+func (r *Resolver) orderedUps(req *dns.Msg) []*doh {
+	now := time.Now()
+	out := make([]*doh, 0, len(r.ups))
+	var later []*doh
+	for _, u := range r.ups {
+		u.mu.Lock()
+		paused := !u.skipUntil.IsZero()
+		probe := paused && !u.probing && !now.Before(u.skipUntil)
+		if probe {
+			u.probing = true
+		}
+		u.mu.Unlock()
+		if probe {
+			go u.probe(req.Copy())
+		}
+		if paused {
+			later = append(later, u)
+		} else {
+			out = append(out, u)
+		}
+	}
+	return append(out, later...)
+}
+
+// probe: Pruefung eines pausierten Upstreams; Erfolg beendet die Pause, ein Fehler verlaengert sie.
+func (u *doh) probe(q *dns.Msg) {
+	ctx, cancel := context.WithTimeout(context.Background(), attemptTimeout)
+	defer cancel()
+	start := time.Now()
+	resp, err := u.exchange(ctx, q)
+	u.mu.Lock()
+	u.probing = false
+	u.mu.Unlock()
+	u.record(time.Since(start), refusedErr(resp, err), true)
+}
+
+// refusedErr: Fehler des Austauschs bzw. errRefused bei der Antwort REFUSED.
+func refusedErr(resp *dns.Msg, err error) error {
+	if err == nil && resp != nil && resp.Rcode == dns.RcodeRefused {
+		return errRefused
+	}
+	return err
+}
+
+// record notes one answer time; probes (fastest mode) only update the times and the health, not the counters.
+func (u *doh) record(d time.Duration, err error, probe bool) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if !probe {
+		u.requests++
+	}
+	if err != nil {
+		if !probe {
+			u.errors++
+		}
+		u.lastErr = err.Error()
+		u.lastErrAt = time.Now()
+		u.fails++
+		if now := u.lastErrAt; u.fails >= breakAfter && !now.Before(u.skipUntil) { // Pause beginnt bzw. verlaengert sich
+			u.backoff = min(max(2*u.backoff, breakMin), breakMax)
+			u.skipUntil = now.Add(u.backoff)
+		}
+		return
+	}
+	u.fails, u.backoff, u.skipUntil = 0, 0, time.Time{}
+	ms := float64(d.Microseconds()) / 1000
+	if u.avgMs == 0 {
+		u.avgMs, u.recentMs = ms, ms
+	} else {
+		u.avgMs = 0.9*u.avgMs + 0.1*ms
+		u.recentMs = 0.7*u.recentMs + 0.3*ms
+	}
+	u.lastOKAt = time.Now()
+}
+
+func (u *doh) use() {
+	u.mu.Lock()
+	u.lastUsed = time.Now()
+	u.mu.Unlock()
+}
+
+func (u *doh) win() {
+	u.mu.Lock()
+	u.wins++
+	u.mu.Unlock()
+}
+
+type Stats struct {
+	Name      string    `json:"name"`
+	URL       string    `json:"url"`
+	Proto     string    `json:"proto"` // doh, dot, doq, dns (klassisch)
+	IPs       []string  `json:"ips"`
+	Requests  uint64    `json:"requests"`
+	Wins      uint64    `json:"wins"`
+	Errors    uint64    `json:"errors"`
+	AvgMs     float64   `json:"avgMs"`
+	Healthy   bool      `json:"healthy"`
+	Active    bool      `json:"active"` // fastest mode: currently among the ones asked first
+	LastError string    `json:"lastError,omitempty"`
+	LastErrAt time.Time `json:"lastErrorAt"`
+	// PausedUntil: Modus der Reihe nach - wird bis dahin uebersprungen (nur noch als Letzter gefragt)
+	PausedUntil *time.Time `json:"pausedUntil,omitempty"`
+}
+
+func (r *Resolver) Stats() []Stats {
+	out := make([]Stats, 0, len(r.ups))
+	active := map[*doh]bool{}
+	if r.mode == ModeFastest {
+		for _, u := range r.first() {
+			active[u] = true
+		}
+	}
+	for _, u := range r.ups {
+		ips := u.IPs
+		if ips == nil { // klassischer Upstream (dns://IP:Port) hat keine Bootstrap-IPs: leere Liste statt null
+			ips = []string{}
+		}
+		u.mu.Lock()
+		out = append(out, Stats{
+			Name: u.Name, URL: u.URL, Proto: Proto(u.URL), IPs: ips,
+			Requests: u.requests, Wins: u.wins, Errors: u.errors, AvgMs: u.avgMs,
+			// healthy until an error is newer than the last success
+			Healthy:   u.lastErrAt.IsZero() || u.lastOKAt.After(u.lastErrAt),
+			LastError: u.lastErr, LastErrAt: u.lastErrAt, Active: active[u],
+		})
+		if r.mode == ModeOrdered && !u.skipUntil.IsZero() {
+			t := u.skipUntil
+			out[len(out)-1].PausedUntil = &t
+		}
+		u.mu.Unlock()
+	}
+	return out
+}
+
+func (u *doh) exchange(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
+	if u.ex != nil {
+		return u.ex.exchange(ctx, req)
+	}
+	q := req.Copy()
+	q.Id = 0 // RFC 8484 §4.1: use ID 0 for cache friendliness
+	wire, err := q.Pack()
+	if err != nil {
+		return nil, err
+	}
+	hreq, err := http.NewRequestWithContext(ctx, http.MethodPost, u.URL, bytes.NewReader(wire))
+	if err != nil {
+		return nil, err
+	}
+	hreq.Header.Set("Content-Type", "application/dns-message")
+	hreq.Header.Set("Accept", "application/dns-message")
+	hresp, err := u.client.Do(hreq)
+	if err != nil {
+		return nil, err
+	}
+	defer hresp.Body.Close()
+	if hresp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, hresp.Body)
+		return nil, fmt.Errorf("HTTP %s", hresp.Status)
+	}
+	body, err := io.ReadAll(io.LimitReader(hresp.Body, dns.MaxMsgSize))
+	if err != nil {
+		return nil, err
+	}
+	resp := new(dns.Msg)
+	if err := resp.Unpack(body); err != nil {
+		return nil, err
+	}
+	resp.Id = req.Id
+	return resp, nil
+}

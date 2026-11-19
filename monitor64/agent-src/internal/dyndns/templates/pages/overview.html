@@ -1,0 +1,143 @@
+{{define "content"}}
+{{$d := .Data}}
+<h1 class="h4 mb-3"><img src="/static/img/dyndns64.webp" alt="{{.T "dyn.title"}}" height="26" class="me-1 align-text-bottom logo logo-light"><img src="/static/img/dyndns64_dark.webp" alt="{{.T "dyn.title"}}" height="26" class="me-1 align-text-bottom logo logo-dark">{{.Doc "dyndns"}}</h1>
+<p class="text-body-secondary small">{{.T "dyn.hint"}}</p>
+<div class="row g-3">
+	<div class="col-lg-5 d-flex flex-column gap-3">
+		<div class="card">
+			<div class="card-header"><i class="bi bi-router text-info"></i> {{.T "dyn.conn.title"}}{{.Doc "dyndns#anschluss"}}</div>
+			<div class="card-body small">
+				{{if and $d.V4.CheckedAt.IsZero $d.V6.CheckedAt.IsZero}}<div class="text-body-secondary mb-2">{{.T "dyn.conn.none"}}</div>{{end}}
+				<dl class="row mb-0">
+					{{range $f := $d.Fams}}
+					<dt class="col-4">IPv{{$f.Fam}}</dt>
+					<dd class="col-8">
+						{{if $f.IP}}<span class="font-monospace text-break">{{$f.IP}}</span>{{if $f.Temporary}} <span class="badge text-bg-warning">{{$.T "dyn.conn.temporary_badge"}}</span>{{end}}{{else if $f.NoRoute}}<span class="text-body-secondary">{{$.T "dyn.conn.no_route"}}</span>{{else if $f.CheckedAt.IsZero}}<span class="text-body-secondary">–</span>{{else}}<span class="text-body-secondary">{{$.T "dyn.conn.unknown"}}</span>{{end}}
+						{{if and $f.Err (not $f.NoRoute)}}<div><span class="badge text-bg-danger">{{$f.Err}}</span>{{if $f.IP}} <span class="text-body-secondary">{{$.T "dyn.conn.last_known"}}</span>{{end}}</div>{{end}}
+						{{if not $f.CheckedAt.IsZero}}<div class="text-body-secondary">{{if $f.Source}}{{$.T "dyn.conn.via" "source" $f.Source}} · {{end}}<span title="{{$.Time $f.CheckedAt}}">{{$.T "dyn.conn.checked"}} {{$.Ago $f.CheckedAt}}</span>{{if not $f.ChangedAt.IsZero}} · <span title="{{$.Time $f.ChangedAt}}">{{$.T "dyn.conn.changed"}} {{$.Ago $f.ChangedAt}}</span>{{end}}</div>{{end}}
+					</dd>
+					{{end}}
+					{{if $d.V6.Prefix}}<dt class="col-4">{{.T "dyn.conn.prefix"}}</dt><dd class="col-8"><span class="font-monospace">{{$d.V6.Prefix}}</span></dd>{{end}}
+				</dl>
+				{{if $d.Idle}}<div class="alert alert-secondary py-2 mt-2 mb-0"><i class="bi bi-pause-circle"></i> {{.T "dyn.conn.idle"}}</div>{{end}}
+				{{if $d.Net.Kind}}<div class="alert alert-warning py-2 mt-2 mb-0"><i class="bi bi-exclamation-triangle"></i> {{.T (print "dyn.net." $d.Net.Kind) "hop" $d.Net.Hop}}
+					<div class="mt-1"><a href="https://ipv64.net/blog/cgnat/was-ist-ein-cgnat-carrier-grade-nat-100-64-0-0-10-ipv4-ipv6-glasfaser/" target="_blank" rel="noopener">{{.T "dyn.net.link_article"}}</a> · <a href="https://ipv64.net/faq#h-ds-lite" target="_blank" rel="noopener">{{.T "dyn.net.link_faq"}}</a> · <a href="https://ipv64.net/portmapper" target="_blank" rel="noopener">{{.T "dyn.net.link_portmapper"}}</a></div></div>
+				{{else if and (not $d.Net.At.IsZero) $d.Net.Hops}}<div class="text-body-secondary mt-2" title="{{$d.NetHops}}"><i class="bi bi-check2-circle text-success"></i> {{.T "dyn.net.ok"}}</div>{{end}}
+				{{if $d.V6.NoRoute}}<div class="alert alert-info py-2 mt-2 mb-0"><i class="bi bi-info-circle"></i> {{.T "dyn.conn.no_route6_hint"}}</div>{{end}}
+				{{if $d.V6.Temporary}}<div class="alert alert-warning py-2 mt-2 mb-0"><i class="bi bi-exclamation-triangle"></i> {{.T "dyn.conn.temporary_hint"}}</div>{{end}}
+				{{if $d.Local}}
+				<div class="mt-3 fw-semibold">{{.T "dyn.conn.local6"}}</div>
+				<ul class="list-unstyled mb-0">{{range $d.Local}}<li><span class="font-monospace text-break">{{.Addr}}</span> <span class="text-body-secondary">{{.Iface}}</span>{{if .Temporary}} <span class="badge text-bg-light">{{$.T "dyn.conn.temporary_badge"}}</span>{{end}}{{if .Deprecated}} <span class="badge text-bg-light">{{$.T "dyn.conn.deprecated"}}</span>{{end}}</li>{{end}}</ul>
+				{{end}}
+			</div>
+			<div class="card-footer d-flex align-items-center gap-2 small">
+				<form method="post" action="/dyndns/check" class="m-0"><input type="hidden" name="_csrf" value="{{.CSRF}}"><button class="btn btn-outline-primary btn-sm" type="submit"><i class="bi bi-arrow-repeat"></i> {{.T "dyn.conn.check_now"}}</button></form>
+				{{if not $d.NextAt.IsZero}}<span class="text-body-secondary" title="{{.Time $d.NextAt}}">{{.T "dyn.conn.next" "minutes" $d.Interval}}</span>{{end}}
+			</div>
+		</div>
+		<div class="card" id="api">
+			<div class="card-header"><i class="bi bi-key text-warning"></i> {{.T "dyn.api.title"}}{{.Doc "dyndns#api-key"}}</div>
+			<div class="card-body small">
+				{{if $d.HasKey}}<i class="bi bi-check-circle-fill text-success"></i> {{.T "dyn.api.connected" "account" $d.Account.Account}}{{if $d.Account.Plan}} <span class="badge text-bg-light">{{$d.Account.Plan}}</span>{{end}}
+				{{with $d.Limit}}{{if .Known}}
+				<div class="mt-2">{{if .Limit}}{{$.T "dyn.limit.used" "used" .Used "limit" .Limit}}{{else}}{{$.T "dyn.limit.unlimited" "used" .Used}}{{end}} <span class="text-body-secondary" title="{{$.Time .At}}">({{$.Ago .At}})</span></div>
+				{{if .Limit}}<div class="progress mt-1" style="height:.4rem" role="progressbar" aria-valuenow="{{.Pct}}" aria-valuemin="0" aria-valuemax="100"><div class="progress-bar {{if .Warn}}bg-warning{{else}}bg-success{{end}}" style="width:{{.Pct}}%"></div></div>{{end}}
+				<div class="text-body-secondary">{{$.T "dyn.limit.own" "count" .Own24h}}{{$.Doc "dyndns#limit"}}</div>
+				{{if .Warn}}<div class="alert alert-warning py-2 mt-2 mb-0">{{$.T "dyn.limit.warn"}}</div>{{end}}
+				{{else if .Err}}<div class="mt-2"><span class="badge text-bg-warning">{{$.T "dyn.limit.unknown"}}</span> <span class="text-body-secondary">{{.Err}}</span></div>{{end}}{{end}}
+				<div class="text-body-secondary mt-2">{{.T "dyn.api.central"}} <a href="/settings#ipv64">{{.T "dyn.api.to_settings"}}</a></div>
+				{{else}}<div class="text-body-secondary">{{.T "dyn.api.hint"}}</div>
+				<a class="btn btn-outline-primary btn-sm mt-2" href="/settings#ipv64"><i class="bi bi-key"></i> {{.T "dyn.api.to_settings"}}</a>{{end}}
+			</div>
+		</div>
+		<div class="card" id="settings">
+			<div class="card-header"><i class="bi bi-sliders text-secondary"></i> {{.T "dyn.settings.title"}}{{.Doc "dyndns#pruefung"}}</div>
+			<div class="card-body small">
+				<form method="post" action="/dyndns/settings">
+					<input type="hidden" name="_csrf" value="{{.CSRF}}">
+					<label class="form-label" for="interval">{{.T "dyn.settings.interval"}}</label>
+					<select class="form-select form-select-sm mb-1" id="interval" name="interval">{{range $d.Intervals}}<option value="{{.}}"{{if eq . $d.Interval}} selected{{end}}>{{$.T "dyn.settings.minutes" "n" .}}</option>{{end}}</select>
+					<div class="form-text mb-2">{{.T "dyn.settings.interval_hint"}}</div>
+					<label class="form-label" for="source4">{{.T "dyn.settings.source4"}}</label>
+					<input class="form-control form-control-sm mb-2" id="source4" name="source4" value="{{$d.Source4}}" placeholder="https://ipv4.ipv64.net/ipcheck.php?ipv4" maxlength="300">
+					<label class="form-label" for="source6">{{.T "dyn.settings.source6"}}</label>
+					<input class="form-control form-control-sm mb-1" id="source6" name="source6" value="{{$d.Source6}}" placeholder="https://ipv6.ipv64.net/ipcheck.php?ipv6" maxlength="300">
+					<div class="form-text mb-2">{{.T "dyn.settings.source_hint"}}</div>
+					<div class="row g-2 mb-2">
+						<div class="col-6"><label class="form-label" for="keep_checks">{{.T "dyn.settings.keep_checks"}}</label><select class="form-select form-select-sm" id="keep_checks" name="keep_checks">{{range $d.KeepCOpts}}<option value="{{.}}"{{if eq . $d.KeepC}} selected{{end}}>{{$.T "dyn.settings.days" "n" .}}</option>{{end}}</select></div>
+						<div class="col-6"><label class="form-label" for="keep_updates">{{.T "dyn.settings.keep_updates"}}</label><select class="form-select form-select-sm" id="keep_updates" name="keep_updates">{{range $d.KeepUOpts}}<option value="{{.}}"{{if eq . $d.KeepU}} selected{{end}}>{{if eq . 0}}{{$.T "dyn.settings.forever"}}{{else}}{{$.T "dyn.settings.days" "n" .}}{{end}}</option>{{end}}</select></div>
+					</div>
+					<div class="fw-semibold mb-1">{{.T "dyn.settings.notify"}}{{.Doc "dyndns#benachrichtigungen"}}</div>
+					<div class="form-check form-switch"><input class="form-check-input" type="checkbox" name="notify_ip" id="notify_ip"{{if $d.NotifyIP}} checked{{end}}><label class="form-check-label" for="notify_ip">{{.T "dyn.settings.notify_ip"}}</label></div>
+					<div class="form-check form-switch"><input class="form-check-input" type="checkbox" name="notify_fail" id="notify_fail"{{if $d.NotifyErr}} checked{{end}}><label class="form-check-label" for="notify_fail">{{.T "dyn.settings.notify_fail"}}</label></div>
+					<div class="form-check form-switch"><input class="form-check-input" type="checkbox" name="notify_limit" id="notify_limit"{{if $d.NotifyLim}} checked{{end}}><label class="form-check-label" for="notify_limit">{{.T "dyn.settings.notify_limit"}}</label></div>
+					<div class="form-text mb-2">{{.T "dyn.settings.notify_hint"}} <a href="/notifications">{{.T "nav.notifications"}}</a></div>
+					<button class="btn btn-outline-primary btn-sm" type="submit">{{.T "common.save"}}</button>
+				</form>
+			</div>
+		</div>
+	</div>
+	<div class="col-lg-7 d-flex flex-column gap-3">
+		<div class="card">
+			<div class="card-header d-flex align-items-center"><span><i class="bi bi-globe text-primary"></i> {{.T "dyn.targets.title"}}{{.Doc "dyndns#ziele"}}</span><a class="btn btn-primary btn-sm ms-auto" href="/dyndns/targets/new"><i class="bi bi-plus-lg"></i> {{.T "dyn.targets.add"}}</a></div>
+			{{if $d.Cluster.On}}<div class="card-body small border-bottom py-2" id="cluster">
+				<div><i class="bi bi-diagram-3 text-info"></i> {{if $d.Cluster.Here}}{{.T "dyn.cluster.here"}}{{else if $d.Cluster.Leader}}{{.T "dyn.cluster.other" "node" $d.Cluster.LeaderName}}{{else}}{{.T "dyn.cluster.pending"}}{{end}} <a href="/cluster">{{.T "dyn.cluster.to_cluster"}}</a></div>
+				<form method="post" action="/dyndns/cluster" class="d-flex flex-wrap align-items-center gap-2 mt-2">
+					<input type="hidden" name="_csrf" value="{{.CSRF}}">
+					<label class="text-body-secondary" for="preferred">{{.T "dyn.cluster.preferred"}}</label>
+					<select class="form-select form-select-sm w-auto" id="preferred" name="preferred">
+						<option value="">{{.T "dyn.cluster.auto"}}</option>
+						<option value="{{$d.Cluster.Self}}"{{if eq $d.Cluster.Preferred $d.Cluster.Self}} selected{{end}}>{{.T "dyn.cluster.this_node"}}</option>
+						{{range $d.Cluster.Nodes}}<option value="{{.ID}}"{{if eq $d.Cluster.Preferred .ID}} selected{{end}}>{{.Name}}{{if not .Online}} ({{$.T "dyn.cluster.offline"}}){{end}}</option>{{end}}
+					</select>
+					<button class="btn btn-outline-primary btn-sm" type="submit">{{.T "common.save"}}</button>
+				</form>
+				<div class="form-text">{{.T "dyn.cluster.hint"}}</div>
+			</div>{{end}}
+			{{if not $d.Targets}}<div class="card-body small text-body-secondary">{{.T "dyn.targets.empty"}}</div>
+			{{else}}
+			<div class="table-responsive"><table class="table table-sm table-hover align-middle mb-0 table-cards small">
+				<thead><tr><th>{{.T "dyn.targets.name"}}</th><th>IPv4</th><th>IPv6</th><th>{{.T "dyn.targets.status"}}{{.Doc "dyndns#status"}}</th><th class="d-none d-md-table-cell">{{.T "dyn.targets.token"}}</th><th class="text-end">{{.T "common.actions"}}</th></tr></thead>
+				<tbody>
+				{{range $g := $d.Groups}}
+				<tr class="dyn-domain-row"><td colspan="6"><i class="bi bi-globe2 text-primary"></i> <span class="fw-semibold">{{$g.Domain}}</span> <span class="text-body-secondary">({{len $g.Items}})</span></td></tr>
+				{{range $g.Items}}
+				<tr{{if not .Enabled}} class="text-body-tertiary"{{end}}>
+					<td data-label="{{$.T "dyn.targets.name"}}" class="dyn-host"><a href="/dyndns/targets/{{.ID}}" class="text-break">{{if .Host}}<span class="text-body-secondary">↳</span> <span class="fw-semibold">{{.Host}}</span>{{else}}<span class="fw-semibold">@</span> <span class="text-body-secondary">{{$.T "dyn.targets.apex"}}</span>{{end}}</a></td>
+					<td data-label="IPv4"><span class="badge text-bg-light">{{$.T (print "dyn.mode4." .Mode4)}}</span>{{if .LastIP4}}<div class="font-monospace text-break">{{.LastIP4}}</div>{{end}}</td>
+					<td data-label="IPv6"><span class="badge text-bg-light">{{$.T (print "dyn.mode6." .Mode6)}}</span>{{if .LastIP6}}<div class="font-monospace text-break">{{.LastIP6}}</div>{{end}}{{if .LastPrefix}}<div class="font-monospace text-break">{{.LastPrefix}}</div>{{end}}</td>
+					<td data-label="{{$.T "dyn.targets.status"}}"><span class="badge {{.StatusClass}}"{{if .LastError}} title="{{.LastError}}"{{end}}>{{if .Paused}}{{$.T (print "dyn.pause." .Paused)}}{{else}}{{$.T (print "dyn.status." .Status)}}{{end}}</span>{{if not .LastOKAt.IsZero}}<div class="text-body-secondary" title="{{$.Time .LastOKAt}}">{{$.Ago .LastOKAt}}</div>{{end}}</td>
+					<td data-label="{{$.T "dyn.targets.token"}}" class="d-none d-md-table-cell"><span class="badge {{if eq .TokenKind "record"}}text-bg-success{{else}}text-bg-warning{{end}}">{{$.T (print "dyn.token." .TokenKind)}}</span></td>
+					<td class="text-end text-nowrap"><form method="post" action="/dyndns/targets/{{.ID}}/update" class="d-inline"><input type="hidden" name="_csrf" value="{{$.CSRF}}"><input type="hidden" name="back" value="list"><button class="btn btn-outline-primary btn-sm" type="submit" title="{{$.T "dyn.update.now"}}"><i class="bi bi-cloud-upload"></i></button></form>
+						<a class="btn btn-outline-secondary btn-sm" href="/dyndns/targets/{{.ID}}" title="{{$.T "dyn.targets.edit"}}"><i class="bi bi-pencil"></i></a></td>
+				</tr>
+				{{end}}
+				{{end}}
+				</tbody>
+			</table></div>
+			{{end}}
+		</div>
+		<div class="card">
+			<div class="card-header d-flex align-items-center"><span><i class="bi bi-clock-history text-secondary"></i> {{.T "dyn.checks.title"}}{{.Doc "dyndns#verlauf"}}</span><a class="btn btn-outline-secondary btn-sm ms-auto" href="/dyndns/history"><i class="bi bi-list-ul"></i> {{.T "dyn.history.title"}}</a></div>
+			{{if not $d.Checks}}<div class="card-body small text-body-secondary">{{.T "dyn.checks.empty"}}</div>
+			{{else}}
+			<div class="table-responsive"><table class="table table-sm align-middle mb-0 table-cards small">
+				<thead><tr><th>{{.T "dyn.checks.time"}}</th><th>{{.T "dyn.checks.family"}}</th><th>{{.T "dyn.checks.result"}}</th><th class="d-none d-md-table-cell">{{.T "dyn.checks.source"}}</th><th class="text-end d-none d-md-table-cell">{{.T "dyn.checks.duration"}}</th></tr></thead>
+				<tbody>
+				{{range $d.Checks}}
+				<tr>
+					<td data-label="{{$.T "dyn.checks.time"}}" class="text-nowrap" title="{{$.Time .Time}}">{{$.Ago .Time}}</td>
+					<td data-label="{{$.T "dyn.checks.family"}}"><span class="badge text-bg-light">IPv{{.Family}}</span></td>
+					<td data-label="{{$.T "dyn.checks.result"}}">{{if .IP}}<span class="font-monospace text-break">{{.IP}}</span>{{if .Changed}} <span class="badge text-bg-success">{{$.T "dyn.checks.changed"}}</span>{{end}}{{else if eq .Err "no route"}}<span class="text-body-secondary">{{$.T "dyn.conn.no_route"}}</span>{{else}}<span class="badge text-bg-danger">{{.Err}}</span>{{end}}</td>
+					<td data-label="{{$.T "dyn.checks.source"}}" class="d-none d-md-table-cell text-body-secondary">{{.Source}}</td>
+					<td data-label="{{$.T "dyn.checks.duration"}}" class="text-end text-nowrap d-none d-md-table-cell">{{if .Source}}{{.Ms}} ms{{end}}</td>
+				</tr>
+				{{end}}
+				</tbody>
+			</table></div>
+			{{end}}
+		</div>
+	</div>
+</div>
+{{end}}
+{{define "scripts"}}<script src="/static/js/dyndns.js?v={{.Version}}"></script>{{end}}

@@ -1,0 +1,145 @@
+{
+  "id": "mikrotik",
+  "name": "MikroTik RouterOS",
+  "device": "router",
+  "verified": false,
+  "source": "MIKROTIK-MIB (mtxrHealth, mtxrGaugeTable ab RouterOS 7, mtxrPOETable)",
+  "match": {
+    "object_ids": [
+      ".1.3.6.1.4.1.14988"
+    ],
+    "descr": [
+      "routeros",
+      "mikrotik"
+    ]
+  },
+  "scalars": [
+    {
+      "key": "temp:board",
+      "service": "i18n:monitor64.svc.temp?name=Board",
+      "kind": "temp",
+      "oid": ".1.3.6.1.4.1.14988.1.1.3.10.0",
+      "metric": "temp",
+      "unit": "°C",
+      "factor": 0.1,
+      "rule": "temp.system",
+      "min": -400,
+      "max": 1500
+    },
+    {
+      "key": "mikrotik:system",
+      "service": "RouterOS",
+      "kind": "hw",
+      "oid": ".1.3.6.1.4.1.14988.1.1.4.4.0",
+      "label": "Version"
+    },
+    {
+      "key": "mikrotik:system",
+      "service": "RouterOS",
+      "kind": "hw",
+      "oid": ".1.3.6.1.4.1.14988.1.1.3.8.0",
+      "metric": "voltage",
+      "unit": "V",
+      "factor": 0.1,
+      "min": 0,
+      "max": 10000
+    }
+  ],
+  "tables": [
+    {
+      "key": "temp:{name}",
+      "service": "i18n:monitor64.svc.temp?name={name}",
+      "kind": "temp",
+      "oid": ".1.3.6.1.4.1.14988.1.1.3.100.1",
+      "name_col": 2,
+      "filter": {
+        "col": 4,
+        "values": [
+          1
+        ]
+      },
+      "columns": [
+        {
+          "col": 3,
+          "metric": "temp",
+          "unit": "°C",
+          "rule": "temp.system",
+          "min": -40,
+          "max": 150
+        }
+      ]
+    },
+    {
+      "key": "fan:{name}",
+      "service": "i18n:monitor64.svc.fan?name={name}",
+      "kind": "fan",
+      "oid": ".1.3.6.1.4.1.14988.1.1.3.100.1",
+      "name_col": 2,
+      "filter": {
+        "col": 4,
+        "values": [
+          2
+        ]
+      },
+      "columns": [
+        {
+          "col": 3,
+          "metric": "rpm",
+          "unit": "rpm",
+          "min": 0,
+          "max": 100000
+        }
+      ]
+    },
+    {
+      "key": "poe:{name}",
+      "service": "PoE {name}",
+      "kind": "poe",
+      "oid": ".1.3.6.1.4.1.14988.1.1.15.1.1",
+      "name_col": 2,
+      "columns": [
+        {
+          "col": 3,
+          "text": {
+            "1": "i18n:monitor64.txt.off",
+            "2": "i18n:monitor64.snmp.poe_waiting",
+            "3": "i18n:monitor64.snmp.poe_powered",
+            "4": "i18n:monitor64.snmp.poe_overload",
+            "5": "i18n:monitor64.snmp.poe_short",
+            "6": "i18n:monitor64.snmp.poe_v_low",
+            "7": "i18n:monitor64.snmp.poe_i_low",
+            "8": "i18n:monitor64.snmp.poe_cycle",
+            "9": "i18n:monitor64.snmp.poe_v_high",
+            "10": "i18n:monitor64.snmp.poe_ctrl_error",
+            "11": "i18n:monitor64.snmp.poe_ctrl_upgrade",
+            "12": "i18n:monitor64.snmp.poe_in_detected",
+            "13": "i18n:monitor64.snmp.poe_no_psu",
+            "14": "i18n:monitor64.snmp.poe_ctrl_init",
+            "15": "i18n:monitor64.snmp.poe_vin_low"
+          },
+          "fact": {
+            "code": "poe_fault",
+            "when": [
+              4,
+              5,
+              6,
+              9,
+              10,
+              13,
+              15
+            ],
+            "text": "i18n:monitor64.snmp.poe_fault"
+          }
+        },
+        {
+          "col": 6,
+          "metric": "power",
+          "unit": "W",
+          "factor": 0.1,
+          "min": 0,
+          "max": 100000
+        }
+      ]
+    }
+  ]
+}

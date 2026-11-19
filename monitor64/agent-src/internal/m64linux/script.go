@@ -65,7 +65,7 @@ var mgrNameRE = regexp.MustCompile(`^[a-z]{2,16}$`)
 func knownSection(name string) bool {
 	switch name {
 	case "start", "end", "attr", "note", "df", "df_i", "zpool_list", "zpool_list_rc", "zpool_status",
-		"systemd_failed", "systemd_state", "needs_restarting", "vcgencmd_throttled":
+		"systemd_failed", "systemd_state", "needs_restarting", "vcgencmd_throttled", "pkgstamp":
 		return true
 	}
 	kind, rest, ok := strings.Cut(name, ":")
@@ -237,6 +237,12 @@ func ParseScriptOutput(out []byte, now time.Time) (*m64proto.Report, error) {
 			}
 		case name == "end":
 			ended = true
+		case name == "pkgstamp": // Stand der Paketdatenbank (#159): die Node liest die Updates bei Aenderung neu
+			b := sec.body
+			if len(b) > 4096 {
+				b = b[:4096]
+			}
+			r.PkgStamp = strings.TrimSpace(string(b))
 		default:
 			cmd[name] = sec.body
 		}
@@ -292,14 +298,24 @@ func ParseScriptOutput(out []byte, now time.Time) (*m64proto.Report, error) {
 		addNote(r, m64proto.SecSystemd, m64proto.HintNoSystemd)
 	}
 	rb := readReboot(src)
+	nrFailed := false
 	if nr, ok := cmd["needs_restarting"]; ok && !rb.Required {
-		if code, err := strconv.Atoi(strings.TrimSpace(string(nr))); err == nil {
-			if req, ok := ParseNeedsRestarting(code); ok {
+		// erste Zeile: Exit-Code, danach die Ausgabe (ab Skript-Stand #169; aeltere Ausgaben nur mit Exit-Code)
+		first, rest, _ := strings.Cut(strings.TrimLeft(string(nr), "\n"), "\n")
+		if code, err := strconv.Atoi(strings.TrimSpace(first)); err == nil {
+			req, ok, perr := NeedsRestarting(code, []byte(rest))
+			switch {
+			case perr != nil:
+				nrFailed = true
+				addErr(r, m64proto.SecReboot, perr)
+			case ok:
 				rb.Required = req
 			}
 		}
 	}
-	r.Reboot = rb
+	if !nrFailed || rb.Required {
+		r.Reboot = rb
+	}
 
 	if updMgr != "" {
 		u, err := ParseUpdates(updMgr, cmd["updates"], cmd["updates_sec"])

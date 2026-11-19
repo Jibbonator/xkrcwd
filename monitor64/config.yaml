@@ -1,5 +1,5 @@
 name: Monitor64
-version: "0.1.2-9"
+version: "0.1.11-1"
 slug: monitor64
 description: Monitor64-Agent (6465) und read-only Docker-Proxy (2376)
 arch:

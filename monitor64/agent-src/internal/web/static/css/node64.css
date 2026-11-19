@@ -1,0 +1,376 @@
+/* Node64: gemeinsame Regeln beider Designs (Module und Bausteine). Geladen nach dem Stylesheet des Designs
+   (design-*.css, Liste in internal/web/view.go), das die Farbwerte und Bootstrap-Anpassungen setzt.
+   Vertrag: jedes Design definiert fuer hell und dunkel
+     --n64-chart-1 .. --n64-chart-4 (Reihenfolge der Diagrammfarben, JS liest sie; --n64-chart-1-rgb fuer Flaechen),
+     --n64-beat-neutral (Pillen pausiert/Wartung/unbekannt), --n64-beat-radius;
+   optional (sonst Bootstrap-Wert): --n64-down-stripe (Streifen der gestoerten Pille), --n64-hp-log (Honeypot-Live-Karte,
+   Gruppe Log), --n64-accent-text/--n64-accent-ink (Akzent als Schrift bzw. Schrift auf Akzentflaeche, Monitor64). */
+
+/* Laenderflaggen (Regional Indicator Symbols) auch unter Windows, das keine Flaggen-Emojis hat: Schrift nur fuer diese
+   Zeichen (unicode-range), sonst greift sie nie. "Twemoji Country Flags" aus country-flag-emoji-polyfill 0.1.8 (MIT),
+   Grafiken Twemoji (c) Twitter, Inc. and other contributors, CC-BY 4.0. */
+@font-face {
+	font-family: "Twemoji Country Flags";
+	unicode-range: U+1F1E6-1F1FF, U+1F3F4, U+E0062-E0063, U+E0065, U+E0067, U+E006C, U+E006E, U+E0073-E0074, U+E0077, U+E007F;
+	font-display: swap;
+	src: url("fonts/TwemojiCountryFlags.woff2") format("woff2");
+}
+
+/* Layout-Regeln, die in beiden Designs gleich sind */
+.sidebar-offcanvas { width: var(--sidebar-width); }
+.sidebar .nav-link.disabled, .sidebar-offcanvas .nav-link.disabled { opacity: .55; }
+.content { min-width: 0; } /* volle Breite auf allen Seiten */
+.topbar-crumbs .breadcrumb-item { overflow: hidden; text-overflow: ellipsis; }
+.topbar-crumbs .breadcrumb-item:last-child { max-width: 40vw; font-weight: 600; }
+@media (min-width: 992px) {
+	.sidebar { transition: width .2s ease, flex-basis .2s ease; overflow-x: hidden; }
+	.nav-mini .sidebar .nav-link.nav-sub .bi { font-size: .95rem; }
+}
+@media (min-width: 768px) {
+	.table-shadow > .table { margin-bottom: 0; }
+}
+
+/* Logo je Farbschema */
+.logo-dark { display: none; }
+[data-bs-theme="dark"] .logo-light { display: none; }
+[data-bs-theme="dark"] .logo-dark { display: inline; }
+
+/* Theme-Umschalter: Sonne im Dunkelmodus, Mond im Hellmodus */
+.theme-toggle .bi-sun-fill { display: none; color: var(--ipv64-orange); }
+[data-bs-theme="dark"] .theme-toggle .bi-sun-fill { display: inline; }
+[data-bs-theme="dark"] .theme-toggle .bi-moon-stars-fill { display: none; }
+
+/* Login und Setup */
+.auth-wrap { min-height: 100vh; display: flex; flex-direction: column; justify-content: center; align-items: center; padding: 1rem; }
+.auth-card { width: 100%; max-width: 480px; }
+
+/* Pillen fuer die letzten Messungen, wie im ipv64-Portal */
+.beats { display: flex; flex-wrap: nowrap; gap: 4px; overflow: hidden; }
+/* Gruppenzeilen in Tabellen: passend zu hell und dunkel (table-light bleibt im Dark Mode hell, Text schlecht lesbar) */
+.table > :not(caption) > tr.table-group > * { --bs-table-bg: var(--bs-tertiary-bg); --bs-table-color: var(--bs-body-color); }
+.beat { display: inline-block; width: 6px; height: 20px; border-radius: var(--n64-beat-radius); background: var(--n64-beat-neutral); flex: 0 0 auto; transition: transform .05s; cursor: pointer; }
+.beat:hover { transform: scaleY(1.15); filter: brightness(1.15); }
+.beat-lg { width: 6px; height: 24px; }
+/* Detailseite: schmale Pillen ueber die ganze Breite, neueste rechts; healthchecks.js passt die Anzahl an
+   die Breite an und fuellt fehlende Messungen links mit Platzhaltern */
+.beats-fill { justify-content: space-between; gap: 2px; }
+.beat-empty, .beat-empty:hover { background: var(--bs-secondary-bg); cursor: default; transform: none; filter: none; }
+.beat-up { background: var(--bs-success); }
+/* gestoert zusaetzlich quer gestreift: bei Rot-Gruen-Schwaeche sonst kaum von OK zu unterscheiden (Forum 5068) */
+.beat-down { background: repeating-linear-gradient(180deg, var(--bs-danger) 0 3px, var(--n64-down-stripe, var(--bs-danger-text-emphasis)) 3px 5px); }
+.beat-warning { background: var(--bs-warning); }
+.beat-stabilizing { background: var(--bs-info); }
+.beat-paused, .beat-maintenance, .beat-unknown { background: var(--n64-beat-neutral); }
+.beat-flapping { background: repeating-linear-gradient(45deg, var(--bs-danger) 0 3px, var(--bs-warning) 3px 6px); }
+
+/* Logs */
+.logbox { max-height: 70vh; overflow: auto; white-space: pre-wrap; word-break: break-all; background: var(--bs-tertiary-bg); }
+/* Tabellenzelle mit langen Namen/URLs: bricht ueberall um, die Mindestbreite setzt der Tabellenkopf (min-width), damit
+   nowrap-Nachbarspalten sie nicht auf ein Zeichen Breite druecken */
+.cell-wrap { overflow-wrap: anywhere; word-break: normal; }
+
+/* Tabellen werden auf kleinen Bildschirmen zu Karten */
+@media (max-width: 767.98px) {
+	.table-cards thead { display: none; }
+	.table-cards tr { display: block; border: 1px solid var(--bs-border-color); border-radius: .375rem; margin-bottom: .75rem; padding: .25rem .5rem; }
+	.table-cards td { display: flex; justify-content: space-between; gap: 1rem; border: 0; padding: .25rem 0; }
+	.table-cards td::before { content: attr(data-label); font-weight: 600; color: var(--bs-secondary-color); flex: 0 0 40%; }
+	.table-cards td.text-nowrap { white-space: normal !important; }
+}
+
+/* Breite Tabellen mit vielen Angaben je Zelle (PROXY64, DNS64, Honeypot): auf dem Handy je Zeile eine Karte,
+   Beschriftung links (aus dem Tabellenkopf, app.js), Inhalt rechts und frei umbrochen. Spalten ohne Kopftext oder
+   mit data-nolabel (Name, Knoepfe) nehmen die ganze Breite. */
+@media (max-width: 767.98px) {
+	.table-stack thead { display: none; }
+	.table-stack, .table-stack tbody, .table-stack tr { display: block; width: 100%; }
+	.table-stack tr { border: 1px solid var(--bs-border-color); border-radius: .375rem; margin: 0 .5rem .6rem; width: auto; padding: .4rem .6rem; }
+	.table-stack tbody tr:first-child { margin-top: .5rem; }
+	.table-stack td { display: block; position: relative; border: 0; padding: .15rem 0 .15rem 6.5rem !important; text-align: start !important;
+		white-space: normal !important; max-width: none !important; overflow-wrap: anywhere; min-height: 1.5rem; }
+	.table-stack td::before { content: attr(data-label); position: absolute; left: 0; top: .15rem; width: 6rem; font-weight: 600; font-family: var(--bs-body-font-family);
+		color: var(--bs-secondary-color); overflow-wrap: anywhere; }
+	.table-stack td:not([data-label]), .table-stack td[data-label=""] { padding-left: 0 !important; }
+	.table-stack td:not([data-label])::before, .table-stack td[data-label=""]::before { content: none; }
+	.table-stack td:empty { display: none; }
+	.table-stack td[colspan] { padding-left: 0 !important; }
+	.table-stack td[colspan]::before { content: none; }
+	.table-stack .text-truncate { white-space: normal !important; }
+}
+
+/* Kennzahl-Kacheln, ueberall gleich: Name klein oben, Wert gross darunter, Symbol rechts (Rahmen, Wert und Symbol
+   je Design). Alle Kacheln einer Reihe sind gleich hoch (Spalten strecken sich, die Karte fuellt die Spalte).
+   Schmale Kacheln (container query) werden kompakter, sehr schmale zeigen kein Symbol. */
+.stat .card-body { display: flex; align-items: center; gap: .75rem; padding: .7rem 1rem; }
+.stat-text { flex: 1 1 auto; min-width: 0; }
+.stat-label { font-size: .875rem; color: var(--bs-secondary-color); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.stat-value-sm { font-size: 1.05rem; line-height: 1.4; white-space: normal; }
+.stat-sub { font-size: .8rem; color: var(--bs-secondary-color); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+a.stat { text-decoration: none; }
+a.stat:hover { background: var(--bs-tertiary-bg); }
+@container (max-width: 12rem) {
+	.stat .card-body { gap: .5rem; padding: .6rem .75rem; }
+	.stat-value { font-size: 1.3rem; }
+	.stat-value-sm { font-size: .95rem; }
+}
+@container (max-width: 9rem) { .stat-icon { display: none; } }
+@media (max-width: 575.98px) {
+	.stat .card-body { gap: .5rem; padding: .6rem .75rem; }
+	.stat-value { font-size: 1.3rem; }
+	.stat-value-sm { font-size: .95rem; }
+}
+/* Dashboard: Kennzahlen von Healthchecks, Proxmox VE und Docker kompakt (Zahl und Text in einer Zeile) */
+.dash-board .stat .card-body { gap: .4rem; padding: .3rem .55rem; }
+.dash-board .stat-text { display: flex; align-items: baseline; gap: .4rem; }
+.dash-board .stat-value { order: -1; flex: 0 0 auto; overflow: visible; font-size: 1.1rem; }
+.dash-board .stat-label { min-width: 0; font-size: .8rem; }
+/* Dashboard anpassen: Werkzeuge nur im Bearbeitungsmodus, ausgeblendete Kacheln dort blass */
+.dash-item { position: relative; }
+.dash-tools { display: none; position: absolute; top: .35rem; right: 1.1rem; z-index: 5; gap: .25rem; align-items: center; background: var(--bs-body-bg); border: 1px solid var(--bs-border-color); border-radius: .375rem; padding: .1rem .25rem; }
+.dash-handle { cursor: grab; color: var(--bs-secondary-color); padding: 0 .15rem; }
+.dash-editing .dash-tools { display: flex; }
+.dash-editing .dash-item > .card { outline: 2px dashed var(--bs-border-color); outline-offset: 2px; }
+.dash-editing .dash-item { cursor: grab; }
+.svc-table:not(.sel-mode) .m64-sel-col { display: none; } /* Monitor64: Mehrfachauswahl der Dienste (#182) */
+#dash .card-header:has(> a > .bi-arrow-right) { cursor: pointer; } /* ganzer Kopf fuehrt zur Seite (#228) */
+.dash-editing #dash .card-header:has(> a > .bi-arrow-right) { cursor: inherit; }
+.dash-item.dash-hidden { display: none; }
+.dash-editing .dash-item.dash-hidden { display: block; opacity: .45; }
+.dash-item.dash-dragging { opacity: .4; }
+.dash-edit-show { display: none !important; }
+.dash-editing .dash-edit-show { display: inline-block !important; }
+.dash-editing .alert.dash-edit-show { display: block !important; }
+.dash-editing .dash-edit-hide { display: none !important; }
+.dash-chart { position: relative; height: 240px; }
+
+/* Healthchecks */
+.hc-lg { display: inline-block; width: .8rem; height: .8rem; border-radius: .2rem; vertical-align: -.1rem; margin-right: .2rem; }
+.hc-group-row td { background: var(--bs-tertiary-bg) !important; padding: .45rem .75rem !important; }
+.hc-group-row.collapsed .hc-group-chev { transform: rotate(-90deg); }
+.hc-group-chev { display: inline-block; transition: transform .15s; }
+.hc-sub-row td { background: transparent !important; padding-left: 1.75rem !important; }
+@media (max-width: 767.98px) {
+	.table-cards.hc-table tr.hc-group-row { display: block; padding: .4rem .6rem; border: 0; background: transparent; margin: .75rem 0 .25rem; }
+	.table-cards.hc-table tr.hc-group-row td { display: block; background: transparent !important; padding: 0 !important; }
+}
+/* Pillen-Spalte waechst nicht ueber den Platz hinaus; aelteste Pillen werden links abgeschnitten,
+   die neuesten bleiben sichtbar. So passen auf dem Tablet alle Spalten inkl. Aktionen. */
+@media (min-width: 768px) {
+	.hc-table td.hc-beats { width: 24%; max-width: 0; }
+	.hc-table td.hc-beats .beats { justify-content: flex-end; }
+}
+/* Handy: kompakte Karte je Check (Zustand, Name, Aktionen; darunter die Pillen), ohne Feldnamen */
+@media (max-width: 767.98px) {
+	.table-cards.hc-table tr { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "status name actions" "beats beats beats"; gap: .35rem .6rem; align-items: start; padding: .6rem .7rem; }
+	.table-cards.hc-table td { display: block; padding: 0; }
+	.table-cards.hc-table td::before { content: none; }
+	.table-cards.hc-table td.hc-c-status { grid-area: status; padding-top: .1rem; }
+	.table-cards.hc-table td.hc-c-name { grid-area: name; min-width: 0; }
+	.table-cards.hc-table td.hc-c-actions { grid-area: actions; }
+	.table-cards.hc-table td.hc-c-actions .btn { padding: .15rem .4rem; }
+	.table-cards.hc-table td.hc-beats { grid-area: beats; }
+	.table-cards.hc-table .hc-target { max-width: 100%; display: block; }
+	.table-cards.hc-table .hc-exec { display: none; } /* Ausfuehrungsort erst auf der Detailseite */
+}
+.hc-target { max-width: min(42vw, 640px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; vertical-align: bottom; }
+.hc-table td.hc-c-target { max-width: 0; width: 22%; } /* Ziel-Spalte: kuerzen statt die Tabelle zu verbreitern */
+/* Ziel als dezentes Badge: Symbol je Art, Text gekuerzt (voller Wert im Tooltip) */
+.hc-target-badge { display: inline-flex; align-items: center; gap: .35rem; max-width: 100%; padding: .15rem .5rem; border: 1px solid var(--bs-border-color); border-radius: 50rem;
+	background: var(--bs-tertiary-bg); color: var(--bs-body-color); font-size: .8rem; line-height: 1.4; vertical-align: middle; }
+.hc-target-badge > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--bs-font-monospace); }
+.hc-target-badge > i { color: var(--bs-secondary-color); flex: 0 0 auto; }
+.hc-target-badge > i.bi-lock-fill { color: var(--bs-success); }
+.hc-target-badge > i.bi-unlock { color: var(--bs-warning); }
+.hc-target-push > span { font-family: inherit; }
+.hc-beats { min-width: 140px; }
+.hc-state-unchecked { background: repeating-linear-gradient(45deg, var(--bs-warning), var(--bs-warning) 6px, #f5d26b 6px, #f5d26b 12px) !important; color: #212529; }
+/* Zeilen der Check-Liste leicht einfaerben: gestoert, instabil/teilweise gestoert, nicht geprueft */
+.hc-table tr.hc-row-down > * { --bs-table-bg: rgba(var(--bs-danger-rgb), .09); }
+.hc-table tr.hc-row-warn > * { --bs-table-bg: rgba(var(--bs-warning-rgb), .12); }
+.hc-table tr.hc-row-stale > * { --bs-table-bg: rgba(var(--bs-warning-rgb), .28); }
+.hc-chart-wrap { position: relative; height: 280px; }
+/* Proxmox VE: Graphen der Detailseite und CPU-Verlauf der letzten Stunde in den Tabellen */
+.pve-chart-wrap { position: relative; height: 220px; }
+.pve-spark { display: block; overflow: visible; }
+.hc-json { max-height: 320px; overflow: auto; font-size: .8rem; background: var(--bs-tertiary-bg); }
+.hc-exec { font-weight: 500; }
+th a { color: inherit; text-decoration: none; }
+th a:hover { text-decoration: underline; }
+
+/* Tooltips der Pillen */
+.hc-tip.show { opacity: 1; }
+.hc-tip { pointer-events: none; } /* liegt der Tooltip ueber der Pille (lange Meldung), kein Hover-Wechsel = kein Flackern */
+.hc-tip .tooltip-inner { text-align: left; max-width: 320px; overflow-wrap: anywhere; padding: .5rem .7rem; font-size: .8rem; line-height: 1.4; color: #e9ecef; background: #1f2328; border: 1px solid #3d444d; border-radius: .4rem; box-shadow: 0 6px 18px rgba(0,0,0,.45); }
+.hc-tip .tooltip-arrow::before { border-top-color: #3d444d; }
+.hc-tip .hc-tip-msg { color: #9aa3ad; }
+.hc-tip .hc-tip-up { color: #4cd38a; }
+.hc-tip .hc-tip-down { color: #ff6b6b; }
+.hc-tip .hc-tip-maintenance { color: #f0ad4e; }
+.hc-tip .hc-tip-dependent { color: #9aa3ad; }
+.nav-img { height: 16px; width: auto; vertical-align: -2px; margin-right: 2px; }
+.hc-empty-img { max-width: min(520px, 100%); }
+
+/* Schriftgroesse (Einstellungen > Darstellung): alles ist rem-basiert und skaliert mit */
+html[data-fs="sm"] { font-size: 87.5%; }
+html[data-fs="lg"] { font-size: 112.5%; }
+html[data-fs="xl"] { font-size: 125%; }
+@media (max-width: 575.98px) {
+	html[data-fs="xl"] { font-size: 118.75%; } /* Handy: etwas gebremst, damit Tabellen-Karten nicht umbrechen */
+}
+.ui-choice { display: grid; grid-template-columns: repeat(auto-fit, minmax(7.5rem, 1fr)); gap: .5rem; }
+.ui-choice .btn { white-space: nowrap; }
+.fs-choice .fs-a-sm { font-size: .8rem; } .fs-choice .fs-a-md { font-size: 1rem; } .fs-choice .fs-a-lg { font-size: 1.2rem; } .fs-choice .fs-a-xl { font-size: 1.4rem; }
+
+/* Messstellen als Zusatzinfo rechts */
+.hc-sources .hc-src-meta { font-size: .78rem; line-height: 1.3; }
+.hc-sources .list-group-item { padding-left: .75rem; padding-right: .75rem; }
+
+/* DynDNS: Ziele unter ihrer Domain */
+.dyn-domain-row > td { background: var(--bs-tertiary-bg) !important; }
+.dyn-host { padding-left: 1.5rem !important; }
+@media (max-width: 767.98px) { .table-cards .dyn-domain-row > td::before { content: none; } .dyn-host { padding-left: .5rem !important; } }
+
+/* Honeypot64: Laenderkarte (Stufe 0 = keine Angriffe, 1-5 logarithmisch; eine Farbe hell -> dunkel, im Dunkelmodus
+   eigene Stufen von dunkel -> hell) */
+.hp-map { display: block; width: 100%; height: auto; --hp-m0: #e3e6ea; --hp-m1: #fdd0a2; --hp-m2: #fdae6b; --hp-m3: #fd8d3c; --hp-m4: #e6550d; --hp-m5: #a63603; }
+.hp-map path { fill: var(--hp-m0); stroke: var(--bs-body-bg); stroke-width: .4; stroke-linejoin: round; }
+.hp-map a path:hover { filter: brightness(1.12); stroke: var(--bs-body-color); stroke-width: .8; }
+.hp-map path.hp-sel { stroke: var(--bs-body-color); stroke-width: 1.2; }
+/* Honeypot64: Live-Karte (honeypot-live.js) - Boegen je Art-Gruppe, Ziel pulsiert; Wiederholungen blasser */
+.hp-map .hp-live path.hp-arc { fill: none; stroke-width: 2.4; stroke-linecap: round; pointer-events: stroke; filter: drop-shadow(0 0 1.5px rgba(0, 0, 0, .35)); }
+.hp-map .hp-live path.hp-arc-replay { stroke-width: 1.8; stroke-opacity: .7; }
+.hp-map .hp-live circle.hp-src { stroke: var(--bs-body-bg); stroke-width: .6; }
+.hp-map .hp-g-login { stroke: var(--bs-danger); fill: var(--bs-danger); }
+.hp-map .hp-g-exploit { stroke: var(--bs-warning); fill: var(--bs-warning); }
+.hp-map .hp-g-scan { stroke: var(--bs-info); fill: var(--bs-info); }
+.hp-map .hp-g-log { stroke: var(--n64-hp-log, var(--bs-primary)); fill: var(--n64-hp-log, var(--bs-primary)); }
+.hp-map .hp-g-probe { stroke: var(--bs-secondary); fill: var(--bs-secondary); }
+.hp-map .hp-live .hp-target-dot { fill: var(--bs-danger); stroke: var(--bs-body-bg); stroke-width: .8; }
+.hp-map .hp-live .hp-target-ring { fill: none; stroke: var(--bs-danger); stroke-width: 1; transform-box: fill-box; transform-origin: center; animation: hp-pulse 2s ease-out infinite; }
+@keyframes hp-pulse { from { transform: scale(.6); opacity: .9; } to { transform: scale(3); opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .hp-map .hp-live .hp-target-ring { animation: none; } }
+.hp-live-dot { display: inline-block; width: .5rem; height: .5rem; border-radius: 50%; background: currentColor; vertical-align: .05rem; }
+[aria-pressed="true"] > .hp-live-dot { animation: hp-blink 1.4s steps(2) infinite; }
+@keyframes hp-blink { 50% { opacity: .2; } }
+.hp-live-row { display: flex; gap: .4rem; align-items: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hp-live-row > span:last-child { overflow: hidden; text-overflow: ellipsis; }
+.hp-live-sw { flex: 0 0 .55rem; height: .55rem; border-radius: 50%; }
+.hp-live-sw.hp-g-login { background: var(--bs-danger); } .hp-live-sw.hp-g-exploit { background: var(--bs-warning); }
+.hp-live-sw.hp-g-scan { background: var(--bs-info); } .hp-live-sw.hp-g-log { background: var(--n64-hp-log, var(--bs-primary)); }
+.hp-live-sw.hp-g-probe { background: var(--bs-secondary); }
+/* Live-Karte: Auswahl (feste Boegen), Hervorhebung, Logo, Vollbild mit Seitenleiste unten links ueber dem Pazifik, Logo oben
+   links (Fullscreen API oder Klasse hp-fs) */
+.hp-map .hp-live-sel path { fill: none; stroke-width: 3; stroke-linecap: round; stroke-opacity: .8; pointer-events: stroke; }
+.hp-map text { font-family: "Twemoji Country Flags", var(--bs-body-font-family); pointer-events: none; paint-order: stroke; stroke: var(--bs-body-bg); stroke-width: 2.4px; stroke-linejoin: round; }
+.hp-map .hp-lbl { pointer-events: none; } /* Klicks und Tooltips gehen an das Land darunter */
+.hp-map .hp-lbl rect { fill: rgba(33, 37, 41, .72); }
+.hp-map .hp-lbl text { fill: #f8f9fa; stroke: none; }
+.hp-map .hp-lbl-dst text { font-weight: 600; }
+.hp-map text.hp-name { fill: var(--bs-body-color); opacity: .4; text-anchor: middle; }
+.hp-map path.hp-hit { fill: #ffe08a; transition: fill .4s; }
+.hp-map .hp-live .hp-target.hp-hit .hp-target-dot { fill: #ffc107; } /* Kleinstaat ohne Flaeche: Zielpunkt leuchtet */
+[data-bs-theme="dark"] .hp-map path.hp-hit { fill: #f5d76e; }
+.hp-live-strip { gap: .3rem 1rem; }
+.hp-map .hp-live path.hp-hot { stroke-width: 4; stroke-opacity: 1; }
+.hp-live-rep { opacity: .65; }
+.hp-live-click { cursor: pointer; border-radius: .2rem; } .hp-live-click:hover { background: var(--bs-tertiary-bg); }
+.hp-live-mapwrap { position: relative; }
+.hp-live-logo { position: absolute; left: .4rem; bottom: .3rem; opacity: .7; line-height: 0; }
+.hp-live-logo:hover { opacity: 1; }
+.hp-live-logo img { height: 18px; }
+.hp-live-panel .hp-live-fs { display: none; }
+.hp-live-panel [data-hp-live-selbox] { padding-top: .4rem; }
+.hp-live-stage.hp-fs { position: fixed; inset: 0; z-index: 1060; background: var(--bs-body-bg); display: flex; align-items: center; justify-content: center; }
+.hp-live-stage.hp-fs .hp-live-mapwrap { position: static; width: 100%; height: 100%; }
+.hp-live-stage.hp-fs .hp-map { width: 100%; height: 100%; }
+.hp-live-stage.hp-fs .hp-live-logo { left: 1rem; top: 1rem; bottom: auto; } .hp-live-stage.hp-fs .hp-live-logo img { height: 30px; }
+.hp-live-stage.hp-fs .hp-live-panel { position: absolute; bottom: 1rem; left: 1rem; width: 22rem; max-height: calc(100% - 5rem); overflow-y: auto; padding: .7rem;
+	background: rgba(var(--bs-body-bg-rgb), .88); border: 1px solid var(--bs-border-color); border-radius: .4rem; box-shadow: 0 .25rem 1rem rgba(0, 0, 0, .25); backdrop-filter: blur(4px); }
+.hp-live-stage.hp-fs .hp-live-panel .hp-live-fs { display: block; }
+.hp-live-stage.hp-fs .hp-live-panel [data-hp-live-selbox] { border-top: 1px solid var(--bs-border-color); }
+@media (max-width: 767.98px), (orientation: portrait) {
+	.hp-live-stage.hp-fs .hp-live-panel { top: auto; bottom: 0; left: 0; right: 0; width: auto; max-height: 42%; border-radius: .4rem .4rem 0 0; }
+	.hp-live-stage.hp-fs .hp-live-logo { top: 1rem; bottom: auto; }
+}
+.hp-map .hp-m1 { fill: var(--hp-m1); } .hp-map .hp-m2 { fill: var(--hp-m2); } .hp-map .hp-m3 { fill: var(--hp-m3); }
+.hp-map .hp-m4 { fill: var(--hp-m4); } .hp-map .hp-m5 { fill: var(--hp-m5); }
+.hp-sw { display: inline-block; width: .9em; height: .9em; border-radius: .2em; vertical-align: -.1em; }
+.hp-sw.hp-m1 { background: #fdd0a2; } .hp-sw.hp-m2 { background: #fdae6b; } .hp-sw.hp-m3 { background: #fd8d3c; }
+.hp-sw.hp-m4 { background: #e6550d; } .hp-sw.hp-m5 { background: #a63603; }
+[data-bs-theme="dark"] .hp-map { --hp-m0: #2c3238; --hp-m1: #5e2d0c; --hp-m2: #8f420f; --hp-m3: #c75d14; --hp-m4: #f07f2a; --hp-m5: #ffb46b; }
+[data-bs-theme="dark"] .hp-sw.hp-m1 { background: #5e2d0c; } [data-bs-theme="dark"] .hp-sw.hp-m2 { background: #8f420f; }
+[data-bs-theme="dark"] .hp-sw.hp-m3 { background: #c75d14; } [data-bs-theme="dark"] .hp-sw.hp-m4 { background: #f07f2a; }
+[data-bs-theme="dark"] .hp-sw.hp-m5 { background: #ffb46b; }
+
+/* PROXY64: an den Honeypot-Koeder gegebene Anfragen (lila wie im Diagramm) */
+.hp-decoy { color: var(--bs-purple, #6f42c1); }
+.hp-decoy-badge { background-color: var(--bs-purple, #6f42c1); color: #fff; }
+/* CDN64 einschalten: Modus-Erklaerung mit Skizze, Kasten waehlt den Modus */
+.c64o-ascii { font-size: .72rem; line-height: 1.25; white-space: pre; overflow-x: auto; color: var(--bs-secondary-color); }
+.c64o-pick { cursor: pointer; }
+.c64o-pick:hover, .c64o-pick:focus-visible { border-color: var(--bs-primary) !important; }
+.c64o-pick.active { border-color: var(--bs-primary) !important; background-color: var(--bs-primary-bg-subtle); }
+.c64o-mode3 { border-style: dashed !important; }
+
+/* Tabellen sortieren (table-sort.js) */
+th.th-sort { cursor: pointer; user-select: none; white-space: nowrap; }
+th.th-sort .th-sort-icon { font-size: .7em; margin-left: .25rem; opacity: .35; }
+th.th-sort[aria-sort="ascending"] .th-sort-icon, th.th-sort[aria-sort="descending"] .th-sort-icon { opacity: .9; }
+th.th-sort:hover .th-sort-icon { opacity: .7; }
+
+/* Platzhalter deutlich von echten Eingaben unterscheiden (blasser, kursiv; Forum 5141) */
+.form-control::placeholder {
+	color: var(--bs-secondary-color);
+	opacity: .6;
+	font-style: italic;
+}
+/* IPAM64: Praefix-Baum, Raster und Arten (Farben aus den Diagrammfarben bzw. Bootstrap, beide Designs) */
+.ipam-tree-ind { display: inline-block; width: 1.1rem; color: var(--bs-border-color); }
+.ipam-bar { display: flex; height: .45rem; min-width: 6rem; border-radius: 99px; overflow: hidden; background: var(--bs-secondary-bg); }
+.ipam-bar > span { display: block; height: 100%; background: var(--n64-chart-1); }
+.ipam-bar > span.ipam-bar-warn { background: var(--bs-warning); }
+.ipam-bar > span.ipam-bar-full { background: var(--bs-danger); }
+.ipam-grid { display: flex; flex-direction: column; gap: 3px; max-width: 64rem; }
+.ipam-row { display: grid; grid-template-columns: repeat(32, minmax(0, 1fr)); gap: 3px; }
+.ipam-cell { display: inline-block; width: .8rem; height: .8rem; border-radius: 3px; border: 1px solid var(--bs-border-color); vertical-align: -1px; }
+.ipam-row .ipam-cell { display: flex; align-items: center; justify-content: center; width: auto; height: auto; aspect-ratio: 1; font: 600 .6rem/1 var(--bs-font-monospace);
+	color: var(--bs-secondary-color); text-decoration: none; overflow: hidden; }
+a.ipam-cell:hover, a.ipam-cell:focus-visible { outline: 2px solid var(--bs-body-color); outline-offset: 1px; }
+.ipam-dhcp { background: var(--n64-chart-1); border-color: var(--n64-chart-1); }
+.ipam-fixed { background: var(--n64-chart-4); border-color: var(--n64-chart-4); }
+.ipam-static { background: var(--n64-chart-3); border-color: var(--n64-chart-3); }
+.ipam-row .ipam-dhcp, .ipam-row .ipam-fixed, .ipam-row .ipam-static, .ipam-row .ipam-conflict { color: #fff; }
+.ipam-conflict { background: var(--bs-danger); border-color: var(--bs-danger); }
+.ipam-pool { background: rgba(var(--n64-chart-1-rgb), .14); border-color: transparent; }
+.ipam-reserved { background: var(--bs-warning-bg-subtle); border-color: var(--bs-warning-border-subtle); }
+.ipam-na { background: var(--bs-tertiary-bg); border-color: transparent; opacity: .55; }
+.ipam-free-row td { color: var(--bs-secondary-color); font-size: .85rem; border-style: dashed; }
+/* Raster und Liste auf einer Seite: Treffer von Filter/Suche, markierte Zeile, Blockuebersicht grosser Praefixe */
+.ipam-marking a.ipam-cell:not(.ipam-match) { opacity: .28; }
+.ipam-marking a.ipam-cell.ipam-match { box-shadow: 0 0 0 2px var(--bs-primary); }
+a.ipam-cell.ipam-selected, a.ipam-cell.ipam-hover, a.ipam-cell.ipam-active { outline: 2px solid var(--bs-body-color); outline-offset: 1px; opacity: 1; }
+tr.ipam-hit > * { --bs-table-bg-state: var(--bs-primary-bg-subtle); }
+.ipam-lvl-empty { background: var(--bs-body-bg); }
+.ipam-lvl-low { background: rgba(var(--n64-chart-1-rgb), .25); border-color: rgba(var(--n64-chart-1-rgb), .4); }
+.ipam-lvl-mid { background: rgba(var(--n64-chart-1-rgb), .55); border-color: rgba(var(--n64-chart-1-rgb), .7); }
+.ipam-lvl-high, .ipam-lvl-used { background: rgba(var(--n64-chart-1-rgb), .85); border-color: var(--n64-chart-1); }
+.ipam-lvl-full { background: var(--n64-chart-1); border-color: var(--n64-chart-1); }
+.ipam-row .ipam-lvl-high, .ipam-row .ipam-lvl-used, .ipam-row .ipam-lvl-full { color: #fff; }
+.ipam-lvl-child { background: repeating-linear-gradient(45deg, var(--bs-tertiary-bg) 0 3px, var(--bs-secondary-bg) 3px 6px); }
+.ipam-map .ipam-cell { text-decoration: none; }
+@media (max-width: 767.98px) { .ipam-row { grid-template-columns: repeat(16, minmax(0, 1fr)); } .ipam-row .ipam-cell { font-size: .55rem; } }
+
+/* Zustandspunkt neben einem Menuepunkt (z. B. Monitor64): pulsiert in der Farbe des Zustands; eingeklappt am Symbol */
+.nav-state, .nav-mini .sidebar .nav-link[data-state]::after { display: inline-block; width: .5rem; height: .5rem; border-radius: 50%; background: var(--n64-ns); animation: n64-ns-pulse 2s ease-out infinite; }
+.nav-state { margin-left: .45rem; vertical-align: middle; position: relative; top: -.05rem; }
+.nav-state.ok, .nav-link[data-state="ok"] { --n64-ns: var(--bs-success); --n64-ns-rgb: var(--bs-success-rgb); }
+.nav-state.warn, .nav-link[data-state="warn"] { --n64-ns: #f59c1a; --n64-ns-rgb: 245, 156, 26; }
+.nav-state.crit, .nav-link[data-state="crit"] { --n64-ns: var(--bs-danger); --n64-ns-rgb: var(--bs-danger-rgb); }
+.nav-mini .sidebar .nav-link[data-state] { position: relative; }
+.nav-mini .sidebar .nav-link[data-state]::after { content: ""; position: absolute; top: .3rem; right: calc(50% - .9rem); }
+@keyframes n64-ns-pulse {
+	0% { box-shadow: 0 0 0 0 rgba(var(--n64-ns-rgb), .6); }
+	70% { box-shadow: 0 0 0 .35rem rgba(var(--n64-ns-rgb), 0); }
+	100% { box-shadow: 0 0 0 0 rgba(var(--n64-ns-rgb), 0); }
+}
+@media (prefers-reduced-motion: reduce) { .nav-state, .nav-mini .sidebar .nav-link[data-state]::after { animation: none; } }

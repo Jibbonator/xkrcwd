@@ -1,0 +1,259 @@
+package cdnedge
+
+import (
+	"io"
+	"net"
+	"net/netip"
+	"strconv"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/ipv64net/node64/internal/tunnel"
+)
+
+func freeListenPort(t *testing.T, network string) int {
+	t.Helper()
+	var addr string
+	if network == "udp" {
+		pc, err := net.ListenPacket("udp", ":0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		addr = pc.LocalAddr().String()
+		pc.Close()
+	} else {
+		ln, err := net.Listen("tcp", ":0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		addr = ln.Addr().String()
+		ln.Close()
+	}
+	_, p, _ := net.SplitHostPort(addr)
+	n, _ := strconv.Atoi(p)
+	return n
+}
+
+// Sperre nach dem Aufbau: eine offene Portmapper-Verbindung wird mit der neuen Konfiguration getrennt.
+func TestLiveBlockedClosesOpenConn(t *testing.T) {
+	back, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer back.Close()
+	go func() {
+		for {
+			c, err := back.Accept()
+			if err != nil {
+				return
+			}
+			go func() { _, _ = io.Copy(c, c); c.Close() }() // Echo, bleibt offen
+		}
+	}()
+	cf, kf, pool, _ := testCA(t, "edge.test")
+	s := startEdge(t, &Config{Name: "A", ListenHTTP: freeAddr(t), TLSCert: cf, TLSKey: kf, DataDir: t.TempDir(), PortRange: "1024-65535"}, pool)
+	s.targetOK = func(a netip.Addr) bool { return a.IsLoopback() }
+	listen := freeListenPort(t, "tcp")
+	conf := func(blocked string) *apiConfig {
+		return &apiConfig{Hosts: []apiHost{{ID: 1, Name: "l.test", Mode: 3, UserID: 1, Blocked: blocked,
+			Target:   &apiTarget{Addrs: []string{"127.0.0.1"}, Port: 80, Scheme: "http"},
+			Mappings: []apiMapping{{Listen: listen, Transport: "tcp", Port: port(back.Addr().String())}}}}}
+	}
+	s.applyConfig(conf(""))
+	c, err := net.DialTimeout("tcp", "127.0.0.1:"+strconv.Itoa(listen), 3*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+	b := make([]byte, 10)
+	if _, err := c.Write([]byte("hi")); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := c.Read(b); err != nil || string(b[:n]) != "hi" {
+		t.Fatalf("echo: %q %v", b[:n], err)
+	}
+	for i := 0; i < 50 && s.liveCount() == 0; i++ {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if s.liveCount() != 1 {
+		t.Fatalf("tracked: %d", s.liveCount())
+	}
+	s.applyConfig(conf("traffic")) // gesperrt (z. B. Traffic aufgebraucht)
+	if _, err := c.Read(b); err == nil {
+		t.Fatal("open connection must be closed after the name is blocked")
+	}
+	for i := 0; i < 50 && s.liveCount() != 0; i++ {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if s.liveCount() != 0 {
+		t.Fatalf("still tracked: %d", s.liveCount())
+	}
+}
+
+// UDP: das Ziel darf einem Besucher nicht viel mehr schicken, als von ihm kam (gefaelschte Absender).
+func TestPortmapUDPAmplification(t *testing.T) {
+	back, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer back.Close()
+	go func() { // auf jedes Datagramm 100 Antworten zu je 1000 Bytes
+		b := make([]byte, 2048)
+		big := make([]byte, 1000)
+		for {
+			_, from, err := back.ReadFromUDP(b)
+			if err != nil {
+				return
+			}
+			for i := 0; i < 100; i++ {
+				_, _ = back.WriteToUDP(big, from)
+			}
+		}
+	}()
+	cf, kf, pool, _ := testCA(t, "edge.test")
+	s := startEdge(t, &Config{Name: "A", ListenHTTP: freeAddr(t), TLSCert: cf, TLSKey: kf, DataDir: t.TempDir(), PortRange: "1024-65535"}, pool)
+	s.targetOK = func(a netip.Addr) bool { return a.IsLoopback() }
+	listen := freeListenPort(t, "udp")
+	s.applyConfig(&apiConfig{Hosts: []apiHost{{ID: 1, Name: "a.test", Mode: 3, UserID: 1,
+		Target:   &apiTarget{Addrs: []string{"127.0.0.1"}, Port: 80, Scheme: "http"},
+		Mappings: []apiMapping{{Listen: listen, Transport: "udp", Port: port(back.LocalAddr().String())}}}}})
+	c, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: listen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_, _ = c.Write([]byte("x")) // 1 Byte rein
+	got := 0
+	b := make([]byte, 2048)
+	for {
+		_ = c.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		n, err := c.Read(b)
+		if err != nil {
+			break
+		}
+		got += n
+	}
+	if got == 0 || got > udpFree+udpAmp*1 {
+		t.Fatalf("visitor got %d bytes for 1 byte sent (limit %d)", got, udpFree+udpAmp)
+	}
+}
+
+// Modus 3: UDP zu einem bekannten Verstaerker-Dienst (DNS, NTP, memcached ...) wird nicht weitergeleitet - das Ziel
+// bekommt nichts, der Besucher keine Antwort.
+func TestPortmapUDPReflectPort(t *testing.T) {
+	back, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer back.Close()
+	bport := port(back.LocalAddr().String())
+	tunnel.UDPReflectPorts[bport] = true // im Test steht der Dienst auf einem freien Port statt auf 53/123/...
+	t.Cleanup(func() { delete(tunnel.UDPReflectPorts, bport) })
+	var hits atomic.Int32
+	go func() {
+		b := make([]byte, 2048)
+		for {
+			_, from, err := back.ReadFromUDP(b)
+			if err != nil {
+				return
+			}
+			hits.Add(1)
+			_, _ = back.WriteToUDP(make([]byte, 1000), from)
+		}
+	}()
+	cf, kf, pool, _ := testCA(t, "edge.test")
+	s := startEdge(t, &Config{Name: "A", ListenHTTP: freeAddr(t), TLSCert: cf, TLSKey: kf, DataDir: t.TempDir(), PortRange: "1024-65535"}, pool)
+	s.targetOK = func(a netip.Addr) bool { return a.IsLoopback() }
+	listen := freeListenPort(t, "udp")
+	s.applyConfig(&apiConfig{Hosts: []apiHost{{ID: 1, Name: "a.test", Mode: 3, UserID: 1,
+		Target:   &apiTarget{Addrs: []string{"127.0.0.1"}, Port: 80, Scheme: "http"},
+		Mappings: []apiMapping{{Listen: listen, Transport: "udp", Port: bport}}}}})
+	c, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: listen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	for i := 0; i < 3; i++ {
+		_, _ = c.Write([]byte("x"))
+	}
+	_ = c.SetReadDeadline(time.Now().Add(700 * time.Millisecond))
+	if n, err := c.Read(make([]byte, 2048)); err == nil {
+		t.Fatalf("answer from a reflector port: %d bytes", n)
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("reflector target got %d datagrams", hits.Load())
+	}
+}
+
+// UDP-Download (z. B. durch WireGuard): der Besucher schickt nur kleine ACKs, das Ziel ein Vielfaches davon. In der
+// laufenden Sitzung kommt der Download vollstaendig an (vorher bremste das Zehnfache auf wenige KB/s).
+func TestPortmapUDPDownload(t *testing.T) {
+	back, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer back.Close()
+	sent := make(chan int, 1)
+	go func() { // nach dem ersten Paket 1,5 s lang je Millisekunde 1200 Bytes an den Absender
+		b := make([]byte, 2048)
+		_, from, err := back.ReadFromUDP(b)
+		if err != nil {
+			return
+		}
+		go func() { // weitere ACKs lesen
+			for {
+				if _, _, err := back.ReadFromUDP(b); err != nil {
+					return
+				}
+			}
+		}()
+		big, total := make([]byte, 1200), 0
+		for end := time.Now().Add(1500 * time.Millisecond); time.Now().Before(end); time.Sleep(time.Millisecond) {
+			if _, err := back.WriteToUDP(big, from); err == nil {
+				total += len(big)
+			}
+		}
+		sent <- total
+	}()
+	cf, kf, pool, _ := testCA(t, "edge.test")
+	s := startEdge(t, &Config{Name: "A", ListenHTTP: freeAddr(t), TLSCert: cf, TLSKey: kf, DataDir: t.TempDir(), PortRange: "1024-65535"}, pool)
+	s.targetOK = func(a netip.Addr) bool { return a.IsLoopback() }
+	listen := freeListenPort(t, "udp")
+	s.applyConfig(&apiConfig{Hosts: []apiHost{{ID: 1, Name: "d.test", Mode: 3, UserID: 1,
+		Target:   &apiTarget{Addrs: []string{"127.0.0.1"}, Port: 80, Scheme: "http"},
+		Mappings: []apiMapping{{Listen: listen, Transport: "udp", Port: port(back.LocalAddr().String())}}}}})
+	c, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: listen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() { // ACKs: 60 Bytes alle 20 ms
+		ack := make([]byte, 60)
+		for {
+			_, _ = c.Write(ack)
+			select {
+			case <-stop:
+				return
+			case <-time.After(20 * time.Millisecond):
+			}
+		}
+	}()
+	got := 0
+	b := make([]byte, 2048)
+	for {
+		_ = c.SetReadDeadline(time.Now().Add(700 * time.Millisecond))
+		n, err := c.Read(b)
+		if err != nil {
+			break
+		}
+		got += n
+	}
+	total := <-sent
+	if got < total/2 { // Loopback verliert wenig; vorher kam nur ~32 KB + 10 x ACKs an
+		t.Fatalf("download: visitor got %d of %d bytes", got, total)
+	}
+}

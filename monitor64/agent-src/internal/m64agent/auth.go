@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"os"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -277,6 +278,50 @@ func (s *keyStore) lookup(pub ssh.PublicKey) *keyEntry {
 	return nil
 }
 
+// restrictKeys bindet eine neue Schluesselliste an die from=-Muster des anfragenden Schluessels: sonst koennte ein
+// auf Adressen beschraenkter Schluessel seine Einschraenkung mit "keys" selbst aufheben (und ein Schluesselwechsel
+// verloere ein von Hand gesetztes from= still). Zeilen ohne from= bekommen die Muster des Anfragenden, Zeilen mit
+// anderen Mustern werden abgelehnt. Ohne Einschraenkung bleibt die Liste unveraendert.
+func restrictKeys(data []byte, from []string) ([]byte, error) {
+	if len(from) == 0 {
+		return data, nil
+	}
+	opt := `from="` + strings.Join(from, ",") + `"`
+	var out bytes.Buffer
+	for i, raw := range bytes.Split(data, []byte("\n")) {
+		line := bytes.TrimSpace(raw)
+		if len(line) > 0 && line[0] != '#' {
+			e, err := parseKeyLine(line)
+			if err != nil {
+				return nil, fmt.Errorf("line %d: %w", i+1, err)
+			}
+			switch {
+			case e.from == nil:
+				if _, _, opts, _, _ := ssh.ParseAuthorizedKey(line); len(opts) > 0 {
+					out.WriteString(opt + ",")
+				} else {
+					out.WriteString(opt + " ")
+				}
+			case !slices.Equal(e.from, from):
+				return nil, fmt.Errorf("line %d: from= must match the restriction of the requesting key", i+1)
+			}
+		}
+		out.Write(line)
+		out.WriteByte('\n')
+	}
+	return out.Bytes(), nil
+}
+
+// fromFor liefert die from=-Muster des Schluessels mit diesem Fingerabdruck (nil = keine Einschraenkung).
+func (s *keyStore) fromFor(fp string) []string {
+	for _, k := range s.current() {
+		if Fingerprint(k.key) == fp {
+			return k.from
+		}
+	}
+	return nil
+}
+
 // allowed prueft Schluessel (Wire-Format) und Adresse gegen die aktuelle Liste (Datei, from=). Liefert den Eintrag
 // oder einen Fehler.
 func (s *keyStore) allowed(wire []byte, remote net.Addr) (*keyEntry, error) {
@@ -297,6 +342,17 @@ func (s *keyStore) allowed(wire []byte, remote net.Addr) (*keyEntry, error) {
 		}
 	}
 	return e, nil
+}
+
+// listed meldet, ob die Adresse zu einem ausdruecklichen from=-Muster eines Schluessels passt (Schluessel ohne from=
+// zaehlen nicht: sie passen auf jede Adresse).
+func (s *keyStore) listed(ip netip.Addr) bool {
+	for _, e := range s.current() {
+		if len(e.from) > 0 && fromAllows(e.from, ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *keyStore) current() []keyEntry {
@@ -378,12 +434,16 @@ const (
 // derselben NAT-Adresse kann ihn zwar fuellen, aber ein Platz, dessen Handshake nach preAuthEvictAge noch laeuft,
 // wird fuer eine neue Verbindung derselben Adresse geraeumt (eine Node schafft den Handshake schneller).
 const (
-	preAuthMax      = 8               // insgesamt (unbekannte Adressen)
-	preAuthPerNet   = 3               // je Netz (IPv6 /64, IPv4 je Adresse)
-	preAuthPerGroup = 4               // je IPv6-/48 (viele /64 eines Angreifers belegen nicht alle Plaetze)
-	preAuthPerKnown = 8               // je bekannter Adresse (zaehlt nicht gegen preAuthMax)
-	preAuthKnownMax = 32              // alle bekannten Adressen zusammen
-	preAuthEvictAge = 2 * time.Second // so alt muss ein Platz einer bekannten Adresse sein, um geraeumt zu werden
+	preAuthMax      = 8  // insgesamt (unbekannte Adressen)
+	preAuthPerNet   = 3  // je Netz (IPv6 /64, IPv4 je Adresse)
+	preAuthPerGroup = 4  // je IPv6-/48 (viele /64 eines Angreifers belegen nicht alle Plaetze)
+	preAuthPerKnown = 8  // je bekannter Adresse (zaehlt nicht gegen preAuthMax)
+	preAuthKnownMax = 32 // alle bekannten Adressen zusammen
+	// Adressen, die zu einem from=-Muster der Schluesselliste passen (z. B. die Nodes im LAN), haben einen eigenen
+	// Topf: viele Handshakes aus fremden Netzen verhindern so nicht die Erstanmeldung einer Node (AG-4)
+	preAuthListedMax    = 8
+	preAuthListedPerNet = 4
+	preAuthEvictAge     = 2 * time.Second // so alt muss ein Platz einer bekannten Adresse sein, um geraeumt zu werden
 )
 
 // peer ist die Gegenstelle in drei Stufen: exakte Adresse (ohne Zone), Netz (IPv6 /64, IPv4 = Adresse) und Gruppe
@@ -550,11 +610,12 @@ func (l *limiter) ok(ip string, now time.Time) {
 
 // preAuthSlot ist ein belegter Platz ohne Anmeldung.
 type preAuthSlot struct {
-	p     peer
-	known bool
-	since time.Time
-	conn  io.Closer
-	done  bool // freigegeben oder geraeumt
+	p      peer
+	known  bool
+	listed bool // Topf der Adressen aus from=-Mustern
+	since  time.Time
+	conn   io.Closer
+	done   bool // freigegeben oder geraeumt
 }
 
 // preAuthGate zaehlt Verbindungen, deren Handshake noch laeuft.
@@ -564,6 +625,8 @@ type preAuthGate struct {
 
 	total, knownTotal int
 	perNet, perGrp    map[string]int
+	listedTotal       int
+	listedNet         map[string]int
 	known             map[string][]*preAuthSlot // Plaetze je bekannter Adresse, aelteste zuerst
 }
 
@@ -609,6 +672,21 @@ func (g *preAuthGate) acquire(p peer, known bool, c io.Closer, now time.Time) *p
 	return sl
 }
 
+// acquireListed belegt einen Platz im Topf der Adressen, die zu einem from=-Muster passen (nil = voll).
+func (g *preAuthGate) acquireListed(p peer, c io.Closer, now time.Time) *preAuthSlot {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.listedNet == nil {
+		g.listedNet = map[string]int{}
+	}
+	if g.listedTotal >= preAuthListedMax || g.listedNet[p.net] >= preAuthListedPerNet {
+		return nil
+	}
+	g.listedNet[p.net]++
+	g.listedTotal++
+	return &preAuthSlot{p: p, listed: true, since: now, conn: c}
+}
+
 func (g *preAuthGate) release(sl *preAuthSlot) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -621,6 +699,11 @@ func (g *preAuthGate) drop(sl *preAuthSlot) {
 		return
 	}
 	sl.done = true
+	if sl.listed {
+		decr(g.listedNet, sl.p.net)
+		g.listedTotal--
+		return
+	}
 	if sl.known {
 		own := g.known[sl.p.ip]
 		for i, o := range own {

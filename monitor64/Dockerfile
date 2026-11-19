@@ -8,7 +8,7 @@ WORKDIR /src
 COPY agent-src/go.mod agent-src/go.sum ./
 RUN go mod download
 COPY agent-src/ ./
-ARG AGENT_VERSION=0.1.6+addon
+ARG AGENT_VERSION=0.1.11+addon
 RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.Version=${AGENT_VERSION}" \
       -o /out/monitor64-agent ./cmd/monitor64-agent
 

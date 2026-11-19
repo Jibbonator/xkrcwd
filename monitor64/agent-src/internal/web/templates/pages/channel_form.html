@@ -1,0 +1,79 @@
+{{define "content"}}
+{{$d := .Data}}
+{{$f := $d.Form}}
+<h1 class="h4 mb-3"><i class="bi bi-bell-fill text-warning me-1"></i> {{if $d.Edit}}{{.T "nf.edit"}}{{else}}{{.T "nf.new"}}{{end}} <span class="badge text-bg-light fs-6">{{.T (print "nf.type." $d.Type)}}</span></h1>
+{{if $d.Error}}<div class="alert alert-danger">{{$d.Error}}</div>{{end}}
+{{if not $d.Edit}}
+<div class="mb-3">{{range $d.Types}}<a class="btn btn-sm {{if eq . $d.Type}}btn-primary{{else}}btn-outline-secondary{{end}} me-1 mb-1" href="{{if $d.TypeBase}}{{$d.TypeBase}}{{else}}/notifications/new{{end}}?type={{.}}">{{$.T (print "nf.type." .)}}</a>{{end}}</div>
+{{end}}
+<form method="post" action="{{if $d.Action}}{{$d.Action}}{{else if $d.Edit}}/notifications/{{$d.ID}}/edit{{else}}/notifications/new{{end}}" autocomplete="off">
+<input type="hidden" name="_csrf" value="{{.CSRF}}">
+<input type="hidden" name="type" value="{{$d.Type}}">
+<div class="row g-3">
+	<div class="col-lg-7">
+		<div class="card">
+			<div class="card-body">
+				<div class="mb-3">
+					<label class="form-label" for="name">{{.T "common.name"}}</label>
+					<div class="input-group"><span class="input-group-text"><i class="bi bi-tag"></i></span><input class="form-control" id="name" name="name" value="{{index $f "name"}}" maxlength="100" required autofocus></div>
+				</div>
+				{{if $d.IPv64}}<div class="alert alert-info small py-2"><i class="bi bi-cloud"></i> {{.T "nf.ipv64_form_hint"}}</div>{{else if $d.Server}}<div class="alert alert-info small py-2"><i class="bi bi-cloud"></i> {{.T "nf.server_channel_hint"}}</div>{{end}}
+				{{if eq (print $d.Type) "gotify"}}<div class="alert alert-info small py-2"><i class="bi bi-phone"></i> {{.T "nf.gotify_ios_hint"}}{{.Doc "notifications#gotify"}}</div>{{end}}
+				{{if eq (print $d.Type) "homeassistant"}}<div class="alert alert-info small py-2"><i class="bi bi-house-gear"></i> {{.T "nf.ha_hint"}}{{.Doc "notifications#home-assistant"}}</div>{{end}}
+				{{if eq (print $d.Type) "slack"}}<div class="alert alert-info small py-2"><i class="bi bi-slack"></i> {{.T "nf.slack_hint"}}{{.Doc "notifications#slack"}}</div>{{end}}
+				{{if eq (print $d.Type) "teams"}}<div class="alert alert-info small py-2"><i class="bi bi-microsoft-teams"></i> {{.T "nf.teams_hint"}}{{.Doc "notifications#teams"}}</div>{{end}}
+				{{if eq (print $d.Type) "matrix"}}<div class="alert alert-info small py-2"><i class="bi bi-chat-square-dots"></i> {{.T "nf.matrix_hint"}}{{.Doc "notifications#matrix"}}</div>{{end}}
+				{{if eq (print $d.Type) "app"}}<div class="alert alert-info small py-2"><i class="bi bi-shield-lock"></i> {{.T "nf.app_hint"}}{{.Doc "notifications#ipv64-app"}}</div>{{end}}
+				{{range $d.Fields}}
+				{{$key := print "cfg_" .Key}}
+				<div class="mb-3">
+					{{if eq .Kind "bool"}}
+					<div class="form-check"><input class="form-check-input" type="checkbox" name="{{$key}}" id="{{$key}}"{{if or (eq (index $f $key) "true") (eq (index $f $key) "on")}} checked{{end}}><label class="form-check-label" for="{{$key}}">{{$.T (print "nf.field." .Key)}}</label></div>
+					{{if eq .Key "verify_tls"}}<div class="form-text">{{$.T "nf.field.verify_tls_hint"}}</div>{{end}}
+					{{if eq .Key "critical"}}<div class="form-text">{{$.T "nf.field.critical_hint"}}</div>{{end}}
+					{{else}}
+					<label class="form-label" for="{{$key}}">{{$.T (print "nf.field." .Key)}}{{if .Required}} *{{end}}</label>
+					{{if eq .Kind "select"}}
+					<select class="form-select" id="{{$key}}" name="{{$key}}">{{range .Options}}<option value="{{.}}"{{if eq . (index $f $key)}} selected{{end}}>{{.}}</option>{{end}}</select>
+					{{else if eq .Kind "textarea"}}
+					<textarea class="form-control font-monospace" id="{{$key}}" name="{{$key}}" rows="4"{{if .Secret}} placeholder="{{if $d.Edit}}{{$.T "nf.secret_keep"}}{{end}}"{{end}}>{{index $f $key}}</textarea>
+					{{else if eq .Kind "password"}}
+					<input class="form-control" type="password" id="{{$key}}" name="{{$key}}" value="" autocomplete="new-password" placeholder="{{if $d.Edit}}{{$.T "nf.secret_keep"}}{{end}}"{{if and .Required (not $d.Edit)}} required{{end}}>
+					{{else if eq .Kind "number"}}
+					<input class="form-control" type="number" id="{{$key}}" name="{{$key}}" value="{{index $f $key}}">
+					{{else}}
+					<input class="form-control" id="{{$key}}" name="{{$key}}" value="{{index $f $key}}"{{if .Required}} required{{end}}>
+					{{end}}
+					{{if eq .Key "body"}}<div class="form-text">{{$.T "nf.field.body_hint"}}</div>{{end}}
+					{{if and (eq (print $d.Type) "homeassistant") (eq .Key "url")}}<div class="form-text">{{$.T "nf.ha_url_hint"}}</div>{{end}}
+					{{if eq .Key "webhook_id"}}<div class="form-text">{{$.T "nf.field.webhook_id_hint"}}</div>{{end}}
+					{{if eq .Key "room"}}<div class="form-text">{{$.T "nf.field.room_hint"}}</div>{{end}}
+					{{if eq .Key "device_key"}}<div class="form-text">{{$.T "nf.field.device_key_hint"}}</div>{{end}}
+					{{if and (eq (print $d.Type) "matrix") (eq .Key "token")}}<div class="form-text">{{$.T "nf.field.matrix_token_hint"}}</div>{{end}}
+					{{end}}
+				</div>
+				{{end}}
+			</div>
+		</div>
+	</div>
+	<div class="col-lg-5">
+		<div class="card mb-3">
+			<div class="card-body">
+				<div class="mb-3">
+					<label class="form-label" for="lang">{{.T "nf.lang"}}</label>
+					<div class="input-group"><span class="input-group-text"><i class="bi bi-translate"></i></span><select class="form-select" id="lang" name="lang">{{range $d.Langs}}<option value="{{.}}"{{if eq . (index $f "lang")}} selected{{end}}>{{$.T (print "lang." .)}}</option>{{end}}</select></div>
+				</div>
+				<div class="form-check form-switch mb-2"><input class="form-check-input" type="checkbox" name="enabled" id="enabled"{{if index $f "enabled"}} checked{{end}}><label class="form-check-label" for="enabled">{{.T "nf.enabled"}}</label></div>
+				<div class="form-check form-switch mb-2"><input class="form-check-input" type="checkbox" name="default" id="default"{{if index $f "default"}} checked{{end}}><label class="form-check-label" for="default">{{.T "nf.default"}}</label><div class="form-text">{{.T "nf.default_hint"}}</div></div>
+				<div class="form-check mb-2"><input class="form-check-input" type="checkbox" name="notify_down" id="notify_down"{{if index $f "notify_down"}} checked{{end}}><label class="form-check-label" for="notify_down">{{.T "nf.notify_down"}}</label></div>
+				<div class="form-check mb-2"><input class="form-check-input" type="checkbox" name="notify_up" id="notify_up"{{if index $f "notify_up"}} checked{{end}}><label class="form-check-label" for="notify_up">{{.T "nf.notify_up"}}</label></div>
+			</div>
+		</div>
+		<div class="d-flex gap-2">
+			<button class="btn btn-primary" type="submit">{{.T "common.save"}}</button>
+			<a class="btn btn-outline-secondary" href="/notifications">{{.T "common.cancel"}}</a>
+		</div>
+	</div>
+</div>
+</form>
+{{end}}

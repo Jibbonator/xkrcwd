@@ -1,0 +1,54 @@
+package groups
+
+import (
+	"net/netip"
+	"testing"
+)
+
+// MAC aus den DHCP-Vergaben, wenn die Nachbartabelle das Geraet nicht kennt (z. B. hinter einem Relay).
+func TestLeaseMAC(t *testing.T) {
+	r := NewResolver(nil)
+	r.read = func() (map[netip.Addr]string, error) { return map[netip.Addr]string{}, nil }
+	r.Set([]Group{{ID: 7, Name: "Kinder", Members: []Member{{Kind: KindMAC, Value: "aa:bb:cc:dd:ee:01"}}}})
+	ip := netip.MustParseAddr("10.20.0.100")
+	if m := r.For(ip); m.ID != 0 {
+		t.Fatalf("without lease: %+v", m)
+	}
+	r.SetLeases(map[netip.Addr]string{ip: "aa:bb:cc:dd:ee:01"})
+	if m := r.For(ip); m.ID != 7 || m.MAC != "aa:bb:cc:dd:ee:01" {
+		t.Fatalf("with lease: %+v", m)
+	}
+	if ips := r.IPs("aa:bb:cc:dd:ee:01"); len(ips) != 1 || ips[0] != ip {
+		t.Fatalf("ips %v", ips)
+	}
+}
+
+// Vergaben zaehlen fuer die Adressen eines Geraets nur, wenn die Nachbartabelle das Geraet (je Adressfamilie) gerade nicht kennt - und nie
+// mit einer Adresse, die dort zu einer anderen MAC gehoert (gefaelschte MAC im DHCP-Paket).
+func TestLeaseIPsNotForeign(t *testing.T) {
+	r := NewResolver(nil)
+	neigh := map[netip.Addr]string{netip.MustParseAddr("192.168.50.20"): "02:00:00:00:00:05", netip.MustParseAddr("192.168.50.66"): "02:00:00:00:00:99"}
+	r.neigh.Store(&neigh)
+	r.SetLeases(map[netip.Addr]string{netip.MustParseAddr("192.168.50.105"): "02:00:00:00:00:05", netip.MustParseAddr("192.168.50.66"): "02:00:00:00:00:07"})
+	if ips := r.IPs("02:00:00:00:00:05"); len(ips) != 1 || ips[0].String() != "192.168.50.20" {
+		t.Fatalf("known device: %v", ips)
+	}
+	if ips := r.IPs("02:00:00:00:00:07"); len(ips) != 0 {
+		t.Fatalf("lease address used by another MAC: %v", ips)
+	}
+}
+
+// Kennt die Nachbartabelle das Geraet nur per IPv6, zaehlt seine IPv4-Vergabe trotzdem (sonst fehlt dem Geraetenamen
+// der A-Eintrag); eine zweite IPv4-Vergabe neben der bekannten IPv4-Adresse weiter nicht.
+func TestLeaseIPsPerFamily(t *testing.T) {
+	r := NewResolver(nil)
+	neigh := map[netip.Addr]string{netip.MustParseAddr("2001:db8::5"): "02:00:00:00:00:05", netip.MustParseAddr("192.168.50.20"): "02:00:00:00:00:06"}
+	r.neigh.Store(&neigh)
+	r.SetLeases(map[netip.Addr]string{netip.MustParseAddr("192.168.50.105"): "02:00:00:00:00:05", netip.MustParseAddr("192.168.50.106"): "02:00:00:00:00:06"})
+	if ips := r.IPs("02:00:00:00:00:05"); len(ips) != 2 || ips[0].String() != "192.168.50.105" || ips[1].String() != "2001:db8::5" {
+		t.Fatalf("v6 neighbor + v4 lease: %v", ips)
+	}
+	if ips := r.IPs("02:00:00:00:00:06"); len(ips) != 1 || ips[0].String() != "192.168.50.20" {
+		t.Fatalf("v4 neighbor + v4 lease: %v", ips)
+	}
+}

@@ -1,0 +1,23 @@
+{{define "content"}}
+<h1 class="h5 mb-3">{{.T "login.title"}}</h1>
+<form method="post" action="/login">
+	<input type="hidden" name="_csrf" value="{{.CSRF}}">
+	<input type="hidden" name="next" value="{{.Val "next"}}">
+	<div class="mb-3">
+		<label class="form-label" for="username">{{.T "login.username"}}</label>
+		<div class="input-group"><span class="input-group-text"><i class="bi bi-person"></i></span><input class="form-control" id="username" name="username" value="{{.Val "username"}}" required autofocus autocomplete="username"></div>
+	</div>
+	<div class="mb-3">
+		<label class="form-label" for="password">{{.T "login.password"}}</label>
+		<div class="input-group"><span class="input-group-text"><i class="bi bi-lock"></i></span><input class="form-control" type="password" id="password" name="password" required autocomplete="current-password"></div>
+	</div>
+	<button class="btn btn-primary w-100" type="submit">{{.T "login.submit"}}</button>
+</form>
+{{if or (.Val "sso") (.Val "passkey")}}<div class="text-center text-body-secondary small my-2">{{.T "login.or"}}</div>{{end}}
+{{if .Val "passkey"}}<div class="mb-2 d-none" data-pk-needs>
+<button type="button" class="btn btn-outline-secondary w-100" id="passkey-login" data-csrf="{{.CSRF}}" data-next="{{.Val "next"}}" data-err="{{.T "login.passkey_failed"}}"><i class="bi bi-fingerprint"></i> {{.T "login.passkey"}}</button>
+<div class="text-danger small mt-1 d-none" data-pk-error></div></div>{{end}}
+{{if .Val "sso"}}<a class="btn btn-outline-secondary w-100" href="/login/oidc?next={{.Val "next"}}"><i class="bi bi-box-arrow-in-right"></i> {{.T "login.with" "name" (.Val "sso")}}</a>{{end}}
+{{end}}
+{{define "scripts"}}<script src="/static/js/passkey.js?v={{.Version}}"></script>
+{{end}}

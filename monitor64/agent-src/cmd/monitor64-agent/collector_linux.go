@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"path/filepath"
 
 	"github.com/ipv64net/node64/internal/m64agent"
 	"github.com/ipv64net/node64/internal/m64linux"
@@ -21,7 +22,9 @@ func newCollector(root string) m64agent.Collector {
 }
 
 func (c *linuxCollector) Collect(ctx context.Context, sections []string) *m64proto.Report {
-	return m64linux.Collect(ctx, m64linux.Options{Sections: sections, Root: c.root, Cache: c.cache})
+	// dnf-Logs in den eigenen Ordner: /var/log ist unter ProtectSystem=strict schreibgeschuetzt (#169) - wirkt auch
+	// bei bestehenden Installationen, deren Unit der Agent selbst nicht aendern darf
+	return m64linux.Collect(ctx, m64linux.Options{Sections: sections, Root: c.root, Cache: c.cache, PkgLogDir: filepath.Join(stateDir, "dnf")})
 }
 
 func (c *linuxCollector) Caps() []string {

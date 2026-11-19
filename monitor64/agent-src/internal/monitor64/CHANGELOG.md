@@ -1,0 +1,324 @@
+# Monitor64 – Änderungen
+
+## 0.1.25 – 2026-11-19
+
+Neu:
+
+- Prometheus: `node64_monitor_problems_open` und `node64_monitor_problems_unacked` – offene Probleme, die diese Node führt, und davon nicht quittierte (im Cluster zählt jedes Problem nur bei der zuständigen Node).
+- KI-Schnittstelle (MCP): `monitor64_host` zeigt je Dienst die gerade meldenden und die als in Ordnung bestätigten Regeln, `monitor64_problems` ob ein Problem noch besteht und ob es im Wartungsfenster liegt.
+- Host-Seite: Mehrfachauswahl der Dienste – „Auswählen“ blendet Checkboxen, einen Filter nach Name sowie „Alle“, „Gefilterte“ und „Keine“ ein; die ausgewählten Dienste lassen sich gemeinsam „nicht melden“ (nur anzeigen), „wieder melden“ oder ignorieren. Unter „Ignoriert“ lassen sich mehrere Dienste auf einmal wieder übernehmen. API: `POST /api/monitor64/hosts/{uid}/services/report` (#182).
+- Host bearbeiten: Beim Feld „Tags“ werden die schon vergebenen Tags vorgeschlagen (#193).
+- Host bearbeiten: Schalter „Darf ausgeschaltet sein“ für Geräte, die nur ab und zu laufen (z. B. ein PC im Partykeller). Ist der Host nicht erreichbar, heißt er „ausgeschaltet“ – keine Meldung, kein Problem, er zählt weder in der Übersicht noch beim Punkt in der Navigation. Läuft er, gelten seine Dienste und Warnungen wie sonst (#229). API: `offline_ok` am Host, `view: offline`.
+
+Behoben:
+
+- „Dauerhaft nicht melden“ und „In Ordnung“ im Dienst-Dialog: Nach dem Speichern stand der Dienst noch bis zur nächsten Abfrage (bis zu einem Intervall) mit seiner Warnung in der Liste, sodass man den Knopf oft mehrfach drückte. Jetzt wartet das Speichern kurz auf die neue Abfrage (höchstens 8 s), der Knopf zeigt dabei einen Spinner, und die Seite zeigt gleich den neuen Zustand. Lief beim Speichern gerade eine Abfrage, ging der Anstoß bisher verloren; jetzt folgt direkt danach eine weitere (#225).
+
+## 0.1.24 – 2026-11-18
+
+Neu:
+
+- Zugänge Proxmox VE, PBS, TrueNAS und Agent: Schalter „SMART-Werte abfragen“ (Zugang bearbeiten). Aus fragt Monitor64 keine SMART-Werte mehr ab, schlafende Festplatten bleiben im Ruhezustand – Proxmox VE hat sie für SMART bisher etwa alle 30 Minuten aufgeweckt (Platten mit `skipsmart`, kein `disks/smart`). Die Platten bleiben als Dienste, ohne Zustand, Temperatur, Verschleiß und Sektorfehler. Der SSH-Zugang hat seinen Schalter „SMART lesen“ wie bisher (#215).
+- Host-Seite: Die Zugänge im Kopf (z. B. „Proxmox VE“) öffnen per Klick „Zugang bearbeiten“; in der Karte „Zugänge“ ist der Knopf mit „Bearbeiten“ beschriftet statt nur mit einem Stift.
+- Navigation: Neben „Monitor64“ zeigt ein kleiner pulsierender Punkt den Gesamtzustand – grün alles in Ordnung, gelb-orange Warnung (oder Unbekannt), rot Kritisch bzw. ein Host nicht erreichbar. Pausierte Hosts, Hosts im Wartungsfenster und reine Anzeige-Dienste zählen nicht; eingeklappt sitzt der Punkt am Symbol.
+- „Wert in Ordnung“: Meldet ein Messwert (z. B. SSD-Verschleiß 100 % bei einer NVMe, die weiterläuft), lässt er sich im Info-Dialog des Dienstes oder in den Einstellungen als in Ordnung bestätigen – „bis der Wert schlechter wird“ (bis zum aktuellen Wert gilt der Dienst als OK; wird der Wert schlechter oder kommt er unter die Warnschwelle zurück, gilt die Schwelle wieder) oder „dauerhaft nicht melden“ (Warnung und Kritisch an diesem Dienst aus). Bisher ging das nur für Zustandsregeln wie „Port ohne Link“; bei Werten, die nicht über 100 % steigen können, ließ sich die Schwelle nicht passend setzen. API: `accept` beim Ändern eines Dienstes nimmt jetzt auch Regel-Arten mit Zahlenwerten.
+
+Behoben:
+
+- Benachrichtigung: Erinnerungen an ein offenes Problem gingen an die Kanäle der ersten Meldung, nicht an die aktuelle Einstellung – wer z. B. Kritisch von SMS auf die App umgestellt hat, bekam die tägliche Erinnerung weiter per SMS. Erinnerungen (auch „nicht erreichbar“) gehen jetzt an die eingestellten Kanäle; die Entwarnung bekommen weiterhin alle, die das Problem kennen.
+- Probleme: „Als gelöst markieren“ tat bei einem Wert, der weiter nicht passt, scheinbar nichts – das Problem wurde geschlossen, die sofort angestoßene Abfrage eröffnete es aber gleich neu (neue Startzeit, Quittierung weg, Erinnerungen wieder an). Der Knopf erscheint jetzt nur noch, wo er wirkt: bei Traps, pausierten Hosts, Hosts ohne aktuellen Stand und Diensten eines nicht erreichbaren Hosts; sonst steht dort der Hinweis, dass das Problem automatisch gelöst wird. Die API lehnt das Lösen in diesem Fall mit 409 `still_failing` ab statt still zu „gelingen“.
+
+Geändert:
+
+- Übersicht: Die Karten „Probleme“ und „Zuletzt“ sind weg – direkt unter den Zählern stehen jetzt die Hosts (Kacheln oder Liste). Neu ist eine Zähler-Karte „Probleme“ (offen, davon nicht quittiert), ein Klick führt zum Reiter Probleme.
+- Übersicht, Kacheln: Unter der Mini-Kurve steht, was sie zeigt – „CPU · 24 Std.“ mit dem Höchstwert.
+- Host-Seite: Ein Klick auf einen Dienst öffnet einen Dialog in der Mitte mit großem Verlauf (Zeitraum 6 Std. bis 1 Jahr, bei mehreren Messgrößen wählbar), allen Messwerten als Tabelle (Wert, Zustand, Schwellen) und den Angaben zum Dienst (Zustand seit, Zugang, Abfrage, Meldung, Quittierung, Schlüssel); bei Platten mit SMART stehen die SMART-Werte, beim Dienst „Traps“ die letzten Traps darunter. Quittieren geht direkt im Dialog.
+- Einstellungen und Schwellen: Die Zeile „Gruppe / Tags“ erscheint nur noch, wenn für den Dienst eine Abweichung greift; der Dialog ist breiter, mehrere Schwellen stehen nebeneinander.
+- Host-Seite: Einstellungen und Schwellen öffnet das Zahnrad am Ende jeder Dienst-Zeile (oder der Knopf im Info-Dialog) – ebenfalls als Dialog in der Mitte statt als Seitenleiste.
+
+## 0.1.23 – 2026-11-17
+
+Fehlerbehebungen:
+
+- SNMP-Profile (z. B. QNAP): Platten und Volumes standen weiterhin sporadisch für einige Minuten auf „Unbekannt“, jedes Mal mit Alarm und Entwarnung. Das NAS beantwortet seine Plattentabelle zeitweise ohne Fehler, aber leer oder ohne einzelne Zeilen – das galt bisher als vollständige Antwort, das Halten des letzten Stands aus 0.1.14 griff nur bei ganz ausbleibenden Tabellen. Jetzt kommt jeder Dienst, der in einer Runde fehlt, bis zu 10 Minuten mit seinem letzten Stand (Zustand bleibt, Hinweis „Stand von vor … Min.“); eine Zeile ohne Namensspalte legt keinen Dienst unter der Indexnummer mehr an (#204).
+- Linux-Agent-Installation: Auf Raspberry Pi OS 32 Bit mit 64-Bit-Kernel (z. B. Raspberry Pi 3B+) startete der Agent nicht („status=31/SYS“). Der Installer wählt dort die arm64-Datei, deren Systemaufrufe der Filter `SystemCallArchitectures=native` sofort beendete – „native“ ist die Architektur von systemd (32 Bit), nicht die des Kernels. Die Unit erlaubt jetzt zusätzlich die Architektur der Agent-Datei; bestehende Installationen bekommen das mit einem erneuten Installationsbefehl (Forum 5205).
+- **Agent 0.1.11 (Linux):** systemd-Unit erlaubt die Architektur der Agent-Datei (Raspberry Pi OS 32 Bit mit 64-Bit-Kernel).
+
+## 0.1.22 – 2026-11-16
+
+Neu:
+
+- UniFi: Der Zugang „UniFi“ fragt jetzt auch UniFi Drive ab – z. B. eine UNAS Pro mit demselben API-Schlüssel. Monitor64 erkennt selbst, welche Apps auf der Konsole laufen (Network, Drive oder beides). Dazu kommen je Pool ein Dienst (RAID-Stufe, Zustand, Redundanz, Belegung mit Schwelle, laufende Prüfung bzw. Wiederherstellung) und je Platte einer (Zustand, Temperatur, defekte und nicht korrigierbare Sektoren samt „steigen“, Betriebsstunden, Verschleiß bei SSDs, Risiko-Hinweise, Pool-Zugehörigkeit). Außerdem gibt es Dienste für CPU, RAM, CPU-Temperatur, Netz-Ports und das System mit UniFi-OS- und Drive-Version, Laufzeit und Durchsatz. Bisher scheiterte der Zugang auf einer UNAS, weil er nur die Network Application kannte.
+- UniFi: Der Hinweis bei einem abgelehnten API-Schlüssel nennt jetzt auch die UniFi-OS-Einstellungen (Control Plane → Integrations).
+- Windows: „Neustart nötig“ stand auf vielen PCs dauerhaft auf „ja“ mit dem Grund „PendingFileRenameOperations“. Dort stehen meist nur Dateien, die Windows beim nächsten Start löscht (Reste von Installern und Updates) – das braucht keinen Neustart. Ab Agent 0.1.10 zählen nur Dateien, die beim Neustart ersetzt werden; der Grund steht lesbar da („2 Datei(en) werden beim Neustart ersetzt, z. B. C:\…\app.dll“, „Windows-Komponenten (CBS)“). Meldungen älterer Agents werden lesbar übersetzt.
+- **Agent 0.1.10 (Windows):** „Neustart nötig“ nur bei Dateiersetzungen, nicht bei Löschungen; Gründe lesbar.
+- Zustand gewollt: Meldet eine Zustandsregel (z. B. „Port ohne Link“ an einem gerade ungenutzten Port, „Gast läuft nicht“, „Neustart nötig“), lässt sich im Dienst-Dialog bestätigen, dass der Zustand in Ordnung ist – „bis sich der Zustand ändert“ (bekommt der Port wieder Link, gilt die Regel wieder und ein späterer Ausfall meldet) oder „dauerhaft nicht melden“. Bestätigte Zustände stehen in der Diensteliste und lassen sich aufheben. API: `accept` beim Ändern eines Dienstes.
+
+## 0.1.21 – 2026-11-16
+
+Fehlerbehebungen:
+
+- RHEL, Oracle Linux, AlmaLinux, Rocky, Fedora (dnf): „Neustart nötig“ stand dauerhaft auf „ja“ und die Updates meldeten „Read-only file system: '/var/log/dnf.log'“. Der Agent-Dienst darf nicht nach `/var/log` schreiben, dnf brach deshalb ab – und den Exit-Code 1 von `needs-restarting -r` wertete Monitor64 als „Neustart nötig“. Der Agent lässt dnf jetzt in seinen eigenen Ordner loggen (`/var/lib/monitor64-agent/dnf`, wirkt ohne Neuinstallation), neue Installationen geben zusätzlich die vorhandenen dnf-Logdateien frei. Bricht `needs-restarting` mit einer Fehlermeldung ab, gilt der Dienst als unbekannt (mit Fehler am Zugang) statt „ja“ – beim Agent und per SSH (#169).
+- **Agent 0.1.9 (Linux):** dnf-Logs im eigenen Ordner; `needs-restarting` mit Fehlermeldung ist kein „Neustart nötig“.
+
+## 0.1.20 – 2026-11-15
+
+Sicherheit:
+
+- **Agent 0.1.8:** Ein auf Adressen beschränkter Node-Schlüssel (`from=` in der Datei `keys`) behält seine Einschränkung beim Schlüsselwechsel; neue Zeilen ohne `from=` bekommen die Einschränkung des anfragenden Schlüssels, Zeilen mit anderer Einschränkung lehnt der Agent ab. Vorher ging ein von Hand gesetztes `from=` beim Wechsel still verloren. Wer `from=` nutzt und Cluster-Schlüssel verwendet, trägt die Adressen der anderen Nodes in `from=` ein.
+- **Agent-Installation:** Der Befehl im Assistenten nennt die Prüfsumme der Datei `SHA256SUMS` aus dem signierten Verzeichnis der Node (`--sums-sha256` bzw. `-SumsSha256`); das Skript startet das Programm nur, wenn beides passt. Ohne diese Angabe prüft `install.sh` die neue Signatur `SHA256SUMS.sig` mit OpenSSL ab 3.0 (ungültig = Abbruch). Vorher kamen Programm und Prüfsummen ohne Signatur aus derselben Quelle – wer beide austauschte, kam durch (ab dem Agent-Release 0.1.8).
+- **Agent 0.1.8:** Verbindungen ohne Anmeldung von unbekannten Adressen haben nur noch 3 Sekunden für den Handshake (statt 10), Adressen aus `from=`-Mustern der Datei `keys` einen eigenen Topf – viele stille Verbindungen aus fremden Netzen blockieren die Erstanmeldung einer Node nicht mehr.
+
+## 0.1.19 – 2026-11-15
+
+Sicherheit (Code-Review):
+
+- Zugang: Wechselt die Art zu SNMP, muss das Geheimnis neu eingegeben werden – vorher blieb das alte (z. B. ein Proxmox-Token) und ging als SNMP-Community im Klartext ans Gerät.
+- Host: Bei einer neuen Adresse fragt Monitor64 nach, bevor gespeicherte Geheimnisse von Zugängen ohne eigene Adresse und ohne gebundenes Ziel (Fingerabdruck, Hostschlüssel) an die neue Adresse gingen; bestätigt werden diese Geheimnisse entfernt und sind neu einzugeben.
+- SNMP-Traps (v3): Der Schutz gegen wiederholte Traps gilt wieder je Engine-ID und Benutzer ohne Verfall – mitgeschnittene Traps wurden nach einer Stunde bzw. über die Adresse eines anderen Hosts wieder angenommen.
+
+Fehlerbehebungen:
+
+- „Fingerabdruck bestätigen/übernehmen“ nach dem Test scheiterte immer mit „Geheimnis neu eingeben“. Erstmals einen Fingerabdruck setzen geht ohne Geheimnis; bei geändertem Fingerabdruck fragt der Dialog das Geheimnis gleich mit ab.
+- Cluster: Der SMART-Dialog funktioniert auch auf einer Node, die den Host nicht selbst überwacht (vorher 404). Ein hier aufgehobenes Quittieren wird nicht mehr von einem älteren Stand einer anderen Node zurückgedreht.
+- Fehlt ein Wert mit Warnung bei einem laufenden Dienst drei Intervalle lang, wird er „unbekannt“ statt grün (keine Entwarnung ohne Erholung); nur ein gestoppter Gast bzw. Container lässt Werte gewollt weg.
+- UniFi: Eine Fehlerantwort (z. B. 502 vom Proxy) bei der ersten Erkennung legt die Art (UniFi OS oder Network Server) nicht mehr dauerhaft falsch fest; eine Anmeldung am falschen Pfad erkennt neu.
+- SNMP: Fehlt bei der ersten Profilwahl (z. B. nach einem Neustart) der Wert der Probe, fragt die nächste Runde neu statt 60 Minuten ohne Profil; scheitern die Skalare eines Profils, kommen Platten und Volumes aus dem letzten Stand.
+- mailcow: Keine Container (mailcow erreicht seine Docker-API nicht) gilt als Fehler statt „0 Container“; die Domain zurückgestellter Mails stimmt auch mit Grund in der Liste; Größen des Mail-Speichers in Zehnerpotenzen wie bei mailcow (`df -H`).
+- FRITZ!Box: Nach einem FRITZ!OS-Update steht die neue Version am Dienst (Beschreibung wird stündlich neu gelesen, die laufende Version gilt vorrangig).
+- Updates nach `pkg upgrade` (FreeBSD/OPNsense, Agent 0.1.7) und per SSH nach `apt upgrade` & Co. nach etwa einer Minute aktuell statt bis zu einer Stunde später (wie beim Linux-Agent, #159).
+- Host-Adresse: Hostnamen werden nach RFC 1123 geprüft (z. B. „nas..lan“, „-nas“ oder „host.123“ werden abgelehnt).
+- **Agent 0.1.7 (FreeBSD):** Updates nach Änderung der Paketdatenbank neu lesen.
+
+## 0.1.18 – 2026-11-15
+
+Fehlerbehebungen:
+
+- Proxmox VE im Cluster: Eine VM bzw. ein Container, der auf eine andere Node migriert (von Hand oder per HA), gilt nicht mehr als verschwunden. Ist die neue Node in Monitor64 als Host eingetragen, zieht der Dienst dorthin um – mit Name, Soll-Zustand, Melden, Schwellen und Verlauf, statt dort als „neu“ zu warten; unter „Zuletzt“ steht „migriert von Node A nach Node B“. Ist die Node nicht eingetragen (z. B. nur ein Zugang auf den Cluster), führt der bisherige Host den Gast mit den Werten aus dem Cluster weiter („läuft auf Node B“). Gleiche Node-Namen in einem anderen Cluster zählen nicht (#165).
+- Proxmox VE: Bei HA-Ressourcen gilt der Soll-Zustand aus der HA-Konfiguration (`started` = soll laufen, `stopped`/`disabled` = darf aus sein) statt „beim Booten starten“; während HA einen Gast verschiebt (`migrate`, `relocate`), meldet „Gast oder Container läuft nicht“ nichts (#165).
+
+## 0.1.17 – 2026-11-14
+
+Fehlerbehebungen:
+
+- Linux-Agent: Nach einem Paket-Update (z. B. `apt upgrade`, `dnf upgrade`, `pacman -Syu`) oder neu geladenen Paketlisten liest der Agent die Updates innerhalb von etwa einer Minute neu, statt bis zu einer Stunde den alten Stand zu melden. Er erkennt das an der Paketdatenbank (dpkg, rpm, pacman, apk, opkg). Ohne Änderung bleibt es bei einer Prüfung pro Stunde (#159).
+- Linux-Agent: „Neustart nötig“ erkennt einen laufenden Kernel ohne Modul-Ordner (Arch) bzw. einen neueren installierten Kernel wieder. Die Dienst-Härtung `ProtectKernelModules=yes` versteckte `/lib/modules` vor dem Agent. Neue Installationen sperren nur noch das Laden von Kernel-Modulen (`CapabilityBoundingSet=~CAP_SYS_MODULE`, `SystemCallFilter=~@module`); bestehende Installationen liest der Agent ab 0.1.6 ohne Neuinstallation richtig (#158).
+- Arch Linux: Ohne `checkupdates` (Paket pacman-contrib) vergleicht `pacman -Qu` nur mit der lokalen Paketliste und meldet meist „0 verfügbar“. Der Dienst „Updates“ weist jetzt darauf hin (Agent und SSH, #158).
+- **Agent 0.1.6 (Linux):** Updates nach Paket-Änderungen neu lesen; „Neustart nötig“ trotz alter Dienst-Härtung; Hinweis auf pacman-contrib.
+
+## 0.1.16 – 2026-11-14
+
+Änderungen:
+
+- Benutzerverwaltung: Den Push-Token der Zugänge sehen nur Administratoren (Host-Seite, `GET /api/monitor64/hosts/{uid}`); „Nur lesen“ sieht die Zugänge ohne Token.
+
+## 0.1.15 – 2026-11-14
+
+Fehlerbehebungen:
+
+- Redfish: HPE iLO 4 lässt sich auch über einen DNS-Namen abfragen. iLO 4 nennt in der Weiterleitung auf den Pfad mit Schrägstrich immer seine IP; ergänzt eine Weiterleitung nur den Schrägstrich, fragt Monitor64 jetzt den Pfad mit Schrägstrich bei der eingetragenen Adresse ab. Zu einem anderen Host geht weiterhin keine Anfrage (#141).
+- FRITZ!Box: Der Zugang prüft das Zertifikat der FRITZ!Box nicht mehr und merkt sich keinen Fingerabdruck. Die FRITZ!Box erzeugt ihr selbst signiertes Zertifikat bei jedem FRITZ!OS-Update neu; der gemerkte Fingerabdruck passte danach nicht mehr und der Zugang fiel aus. Assistent und Zugangsdialog fragen keinen Fingerabdruck mehr ab, ein früher gespeicherter wird ignoriert. Das Kennwort geht dank Digest-Anmeldung weiterhin nie über die Leitung (Forum 5134).
+- Prometheus (macOS): Hilfsvolumes von macOS (/System/Volumes/VM, Preboot, Update, xarts, iSCPreboot, Hardware, Recovery …), Simulator-Volumes, Time-Machine-Snapshots und -Sicherungen sowie temporäre Mounts unter /private/var/folders werden weiter angeboten, aber nicht mehr vorausgewählt – alle Volumes eines APFS-Containers melden dieselbe Belegung und warnten mehrfach. Das Datenvolume, / und externe Laufwerke unter /Volumes bleiben vorausgewählt. Bereits übernommene Dienste bleiben, bis man sie entfernt (#114).
+- Host-Adresse: Eine Adresse nur aus Ziffern und Punkten muss eine gültige IPv4-Adresse sein. Ein Tippfehler wie „10.0.0.2.16“ galt bisher als Hostname und fiel erst beim SSH-Zugang auf, weil API-Zugänge (z. B. PBS) ihre eigene URL nutzen (Forum 5175).
+- Oberfläche: Lange Mountpfade brechen in der Diensttabelle und in der Diensterkennung um, statt in die Nachbarspalte bzw. über den Rand zu ragen (#114).
+
+## 0.1.14 – 2026-11-14
+
+Fehlerbehebungen:
+
+- Redfish: HPE iLO 4 (und andere BMCs, die nur Pfade mit Schrägstrich am Ende annehmen) lässt sich abfragen – Weiterleitungen auf denselben BMC werden befolgt, danach hängt Monitor64 den Schrägstrich selbst an. Eine Adresse mit Pfad (z. B. `https://10.1.15.17/redfish/v1/Systems/`) wird angenommen; zu einem anderen Host wird nie weitergeleitet (#141).
+- Dateisysteme: Mehrere Mounts mit der Quelle `none` (z. B. virtiofs ohne eigenen Namen) fallen nicht mehr zusammen – vorher fehlte einer und galt nach drei Runden als verschwunden. Per SSH sofort, mit dem Agent ab 0.1.5 (#140).
+- SNMP (QNAP u. a.): Antwortet eine Tabelle eines Geräteprofils nicht rechtzeitig, fragt Monitor64 in derselben Runde noch einmal mit kleineren Antworten; bleibt sie aus, gilt bis zu 10 Minuten der letzte Stand (ohne Messwerte, mit Hinweis „Stand von vor … Min.“), statt alle Platten und Volumes nach drei Intervallen auf „Unbekannt“ zu setzen. Fehlt bei der stündlichen Neuwahl einmal die Kennung des Profils, bleibt es gewählt (#136).
+- FRITZ!Box, MikroTik, UniFi: Ein verfügbares Firmware-Update warnt jetzt sofort (neue Regel „Firmware-Update verfügbar“). Bisher lief es über „Sicherheitsupdates ausstehend“, die erst nach 24 Stunden warnt – der Dienst blieb grün (Forum 5134).
+- Dienste-Tabelle: Läuft bei einer Zustandsregel noch die Wartezeit (z. B. „Sicherheitsupdates ausstehend“ nach 24 Std.), steht am Dienst, ab wann er warnt.
+
+Neu:
+
+- Übersicht und Problemseite: Probleme von Hosts im Wartungsfenster stehen am Ende in einem eingeklappten Abschnitt „Im Wartungsfenster“; der Zähler nennt nur die übrigen. So gehen echte Probleme nicht unter, wenn z. B. ein Backup-Server tagsüber planmäßig aus ist (#142).
+- Linux: „Neustart nötig“ auch, wenn ein neuerer Kernel derselben Variante installiert ist als der laufende (Debian, Ubuntu, Proxmox, RHEL, Fedora, Raspberry Pi OS); der Dienst nennt beide Versionen. Per SSH sofort, mit dem Agent ab 0.1.5 (#130).
+- Prometheus-Zugang: smartctl_exporter wird erkannt – je Platte ein Dienst mit SMART-Zustand, Temperatur, Verschleiß und Sektoren wie beim Agent, dazu alle Werte im SMART-Dialog (#135).
+- Prometheus-Zugang: node_exporter unter macOS liefert RAM und Swap als normale Dienste mit Verlauf und Schwellen (Belegung wie in der Aktivitätsanzeige) (#114).
+- **Agent 0.1.5 (Linux):** Mounts mit Quelle `none` einzeln; Kernel-Vergleich für „Neustart nötig“.
+
+## 0.1.13 – 2026-11-13
+
+- Neuer Zugang **UniFi** (eigene Kachel im Assistenten) über die API der UniFi Network Application – für UniFi-OS-Konsolen (UDM, UDR, UCG, Cloud Key, UniFi OS Server) und den selbst gehosteten Network Server; SNMP liefert bei UniFi nur wenig.
+- Je Gerät (Access Point, Switch, Gateway) ein Dienst mit Zustand (offline und gestörte Geräte melden sich), CPU, RAM, Temperatur, Clients, Laufzeit und Firmware; je Port der Switches und Gateways Zustand, Durchsatz, Auslastung, Fehlerrate und PoE-Leistung; je PoE-Switch das belegte PoE-Budget.
+- Internetverbindung des Gateways (Status, Latenz, Durchsatz, letzter Speedtest), Zahl der Clients (WLAN, LAN, Gäste), offene Alarme (soweit die Version sie noch anbietet), Update der Network Application und Firmware-Updates der Geräte.
+- Anmeldung bevorzugt mit lokalem API-Schlüssel (UniFi Network → Integrations; nur auf UniFi OS), sonst mit einem lokalen Nur-Lese-Admin („View Only“, ohne Zwei-Faktor-Anmeldung). Monitor64 liest nur. Fingerabdruck-Pin wie bei den anderen HTTPS-Zugängen, das Geheimnis liegt verschlüsselt. Nach einer abgelehnten Anmeldung wartet Monitor64 (5, 15, 60 Minuten), statt die Konsole in ihre Anmeldesperre zu treiben.
+- Weitere Sites über das Feld „Site“ (leer = default).
+- Zugangsdialog auf der Host-Seite: Das Feld „Benutzer“ erscheint jetzt bei allen Zugängen mit Benutzer (fehlte bei Proxmox Mail Gateway und FRITZ!Box).
+- Bei Gateways mit mehreren WAN-Leitungen warnt der Dienst „Internetverbindung“, wenn eine Leitung ausfällt, auch wenn die Verbindung insgesamt steht.
+- Getestet gegen eine UniFi-OS-Konsole (UDM SE, Network 11.0.99, API-Schlüssel) mit Switch und Access Points sowie gegen einen selbst gehosteten Network Server 10.0.162 (Nur-Lese-Admin).
+
+## 0.1.12 – 2026-11-13
+
+- Neuer Zugang **MikroTik** (eigene Kachel im Assistenten) über die REST-API von RouterOS ab Version 7: CPU, RAM, Flash, Laufzeit und Version; Temperaturen, Lüfter, Netzteile, Spannung und Leistung (soweit das Gerät Sensoren hat); Schnittstellen mit Zustand, Durchsatz und Fehlerrate; Zahl der angemeldeten WLAN-Clients; BGP-Verbindungen (eine eingerichtete Verbindung ohne aufgebaute Sitzung warnt) und OSPF-Nachbarn; RouterOS-Update verfügbar und RouterBOOT.
+- Nur lesend: Monitor64 stellt ausschließlich GET-Abfragen. Der Benutzer gehört in eine Gruppe mit `read,api,rest-api`; der Assistent zeigt die Befehle für Benutzer und Zertifikat (der Dienst `www-ssl` nimmt ohne Zertifikat keine Verbindung an). Fingerabdruck-Pin wie bei den anderen HTTPS-Zugängen, das Passwort liegt verschlüsselt.
+- Ob ein Update bereitsteht, zeigt der Router erst, nachdem er selbst gesucht hat (Zeitplan oder von Hand) – Monitor64 stößt die Suche nicht an.
+- RouterOS 6 hat keine REST-API; dort bleibt SNMP mit dem MikroTik-Profil.
+- Gegen RouterOS 7.25.1 (CHR) getestet.
+
+## 0.1.11 – 2026-11-13
+
+- Dienste-Tabelle: Platten haben einen Knopf „SMART“. Er zeigt alle zuletzt gelesenen SMART-Werte als Dialog – bei SATA-Platten die ganze Attribut-Tabelle (ID, Name, Wert, schlechtester Wert, Schwelle, Rohwert; Attribute unter der Schwelle sind markiert), bei NVMe und SAS die einzelnen Werte, dazu Modell, Seriennummer, Firmware, Gesamtzustand und Zeitpunkt der Messung.
+- Vollständig über den Agent ab 0.1.4 (Linux, FreeBSD), per SSH und über Proxmox VE bzw. Proxmox Backup Server. Windows und ältere Agents zeigen die ausgewerteten Werte (Temperatur, Betriebsstunden, Sektoren …).
+- Die Werte liegen nur im Speicher der Node (der letzte Satz je Platte, kein Verlauf, nichts in der Datenbank); nach einem Neustart sind sie mit der nächsten SMART-Abfrage wieder da. Im Cluster antwortet die zuständige Node.
+- API: `GET /api/monitor64/hosts/{uid}/smart?key=<Dienst>`; Dienste mit SMART-Werten tragen `detail: "smart"`.
+- **Agent 0.1.4:** liefert je Platte alle SMART-Attribute bzw. NVMe-/SAS-Werte, die Firmware und den Zeitpunkt des Lesens.
+
+## 0.1.10 – 2026-11-13
+
+Fehlerbehebungen aus den Meldungen auf GitHub:
+
+- Schwellen: „Abweichung speichern“ und die Vorschau funktionieren wieder – bisher passierte nichts („cur is not a function“ in der Browser-Konsole) (#107).
+- Schwelle „GB frei“: Die Warnung blieb stehen, obwohl wieder mehr frei war als die Schwelle („nur noch 1,2 GB frei (Schwelle 1 GB)“). Die geerbte Hysterese von 2 (gedacht in Prozentpunkten) galt dort als 2 GB; geerbt zählt sie jetzt höchstens als ein Zehntel der Schwelle. Eine am Dienst zusammen mit „GB frei“ gesetzte Hysterese gilt unverändert in GB (#109).
+- SNMP: Geräte ohne Sensor- bzw. LAG-Tabelle (z. B. HP LaserJet), die deren Abfrage mit einer leeren Antwort quittieren, melden keine „Teilabfrage fehlgeschlagen: ENTITY-SENSOR: leere Antwort“ mehr (#98).
+- Platten: Zwei Platten an gleichen USB-Adaptern melden oft dieselbe Seriennummer (die des Adapters) und fielen zu einem Dienst zusammen – die zweite fehlte. Jetzt zählt in dem Fall die Seriennummer aus SMART bzw. der Gerätename; die bisher angezeigte Platte erscheint dadurch einmalig als neuer Dienst (#84).
+- Dienste-Tabelle: Die Kategorie heißt „Gäste und Backups“ statt „Proxmox“ – sie gilt auch für VMs auf Unraid und TrueNAS (#87).
+- Geändertes Zertifikat (z. B. FRITZ!Box nach neuem Namen): Der Zugang erklärt jetzt, was zu tun ist, und „Verbindung testen“ bietet „Neuen Fingerabdruck übernehmen“ an; danach das Geheimnis erneut eingeben und speichern (#121).
+- Statusseiten: Die Tags der Monitor64-Hosts stehen im Tag-Filter des Editors (#102).
+- Assistent Proxmox VE/PBS: Der Hinweis zum Token erklärt die Privilegientrennung – ein Token mit Privilegientrennung braucht die Rolle selbst, es gilt die Schnittmenge aus Benutzer und Token.
+- Assistent „Linux per SSH“: Läuft die Node im Docker-Bridge-Netz, stand in der Zeile für `authorized_keys` die Adresse des Containers (`from="172.…"`) – der Host sieht aber die Adresse des Docker-Hosts und lehnte die Anmeldung ab. Dort steht jetzt ein Platzhalter für die Adresse des Docker-Hosts samt Hinweis; liegt das Ziel im Bridge-Netz selbst (Docker-Host über das Gateway), bleibt die Adresse.
+- „Verbindung testen“ (SSH und Agent) zeigt, mit welcher Adresse tatsächlich verbunden wurde, und die Art des Hostschlüssels – so fällt auf, wenn der Name im Container anders auflöst oder die Verbindung über IPv6 bei einem anderen Server landet. Bietet der Server gar keine Anmeldung per Schlüssel an, sagt die Meldung das statt „attempted methods [none]“.
+- Host-Seite: „Bearbeiten“ (Name, Adresse, Gruppe, Tags) ist ein eigener Knopf neben „Erkennen“ statt eines Eintrags im ⋯-Menü (#126).
+- Proxmox Backup Server: Das Höchstalter der Backups ist am Zugang einstellbar (Stunden, leer = 26) – wer z. B. wöchentlich sichert, bekommt keine Dauerwarnung „Backup zu alt“ mehr.
+- **Agent 0.1.3 (Linux):** Dateisysteme stehen nicht mehr alle als „nur lesbar“ da – der Agent liest das jetzt aus Sicht des Hosts statt aus seiner eigenen, gehärteten Umgebung (#97).
+- **Agent 0.1.3:** startet auf UGREEN-NAS (UGOS): ein dort für alle Dienste gesetztes `GODEBUG` wird nicht mehr geerbt. Die Installation prüft nach dem Start, ob der Dienst läuft, und zeigt sonst die letzten Log-Zeilen. Dass UGOS Upgrades über `apt` sperrt, ist ein Hinweis statt einer fehlgeschlagenen Teilabfrage – auch per SSH (#96).
+- **Agent 0.1.3:** Unter SELinux (Fedora, RHEL, Rocky …) kennzeichnet die Installation den Programmordner als `bin_t`, damit das automatische Update nicht mehr mit „permission denied“ scheitert (#100).
+
+## 0.1.9 – 2026-11-11
+
+- Neuer Zugang **FRITZ!Box** (eigene Kachel im Assistenten) über die Schnittstelle TR-064: Internetverbindung (verbunden/getrennt, Dauer, externe Adresse, aktueller Durchsatz, Zugangsart und Zustand der Leitung), bei DSL-Anschlüssen Sync-Raten, Störabstand, Dämpfung und CRC-Fehler, Laufzeit und FRITZ!OS-Version der Box sowie „Update verfügbar“.
+- Anmeldung mit einem FRITZ!Box-Benutzer (das Kennwort geht dabei nicht über die Leitung). In der FRITZ!Box muss „Zugriff für Anwendungen zulassen“ eingeschaltet sein. Für alle Werte braucht der Benutzer das Recht „FRITZ!Box Einstellungen“ – eine Nur-Lese-Rolle kennt die FRITZ!Box nicht; ohne das Recht kommen Zugangsart, Zustand der Leitung und der Update-Stand.
+
+## 0.1.8 – 2026-11-11
+
+- **Raspberry Pi, Stromversorgung korrigiert (Agent 0.1.2 und SSH):** Die Werte kommen jetzt von `vcgencmd get_throttled` (Unterspannung und Drosselung, jetzt und seit dem Start) und, wo das Programm fehlt oder der Zugriff nicht erlaubt ist, vom Unterspannungs-Alarm des Kernels (nur „jetzt“). Die bisher gelesene Datei `get_throttled` unter `/sys` ist im Pi-Kernel veraltet: Das Lesen schrieb einmal je Start eine Warnung ins Kernel-Log, „seit dem Start“ stimmte damit nicht, und ab Kernel 6.12 (Raspberry Pi OS 13) gibt es sie nicht mehr.
+- Für „seit dem Start“ per SSH muss der Abfrage-Benutzer `vcgencmd` ausführen dürfen (Gruppe `video`); der Agent läuft als root und braucht nichts.
+
+## 0.1.7 – 2026-11-11
+
+- **Inodes:** Jedes Dateisystem mit Inode-Grenze (ext4, XFS …) hat jetzt eine eigene Schwelle „Dateisystem: Inodes belegt“ (Warnung ab 80 %, kritisch ab 90 %) – kein eigener Dienst, der Wert gehört zum Dateisystem und steht ab 50 % auch im Text. Dateisysteme ohne feste Grenze (Btrfs, FAT) haben den Wert nicht.
+- **Btrfs:** je eingehängtem Dateisystem ein Dienst „Btrfs <Label>“ mit Profil (single, raid1 …), Anzahl der Geräte und Belegung der Metadaten; ein fehlendes Gerät wird wie ein degradiertes RAID gemeldet, Fehlerzähler der Geräte (wie `btrfs device stats`) als Warnung. Subvolumes desselben Dateisystems erscheinen weiterhin nur einmal. Kommt mit dem Agent ab 0.1.1 und per SSH sofort.
+- **ZFS:** Die Fragmentierung des Pools steht im Dienst und im Verlauf.
+- **Raspberry Pi:** eigene Kachel im Assistenten; neuer Dienst „Stromversorgung“: Unterspannung jetzt = kritisch, seit dem Start aufgetreten = Warnung, Drosselung = Warnung (Stand der Firmware wie `vcgencmd get_throttled`). Kommt mit dem Agent ab 0.1.1 und per SSH sofort.
+- **Agent 0.1.1:** Die 32-Bit-ARM-Datei läuft jetzt auch auf Raspberry Pi Zero und Pi 1 (ARMv6); das Installationsskript erkennt `armv6l`.
+
+## 0.1.6 – 2026-11-11
+
+- Neuer Zugang **mailcow** (eigene Kachel im Assistenten) über die mailcow-API mit Nur-Lese-Schlüssel: Container (Postfix, Dovecot, Rspamd, SOGo …; jeder, der nicht läuft, wird gemeldet), Belegung des Mail-Speichers (vmail), Mail-Warteschlange mit den größten Ziel-Domains (nutzt die Schwelle „Mail-Warteschlange: zurückgestellte Mails“) und Quarantäne. In mailcow muss die Adresse der Node unter „API-Zugriff erlauben von“ stehen.
+
+## 0.1.5 – 2026-11-11
+
+- Neuer Zugang **Proxmox Mail Gateway** (eigene Kachel im Assistenten): CPU, Load, RAM, Swap und Root-Dateisystem, Dienste (Postfix, SMTP-Filter, ClamAV, Datenbank …), Mail-Warteschlange mit den größten Ziel-Domains, Durchsatz der letzten Stunde (ein, aus, Spam, Viren, abgewiesen), Quarantäne, Alter der ClamAV-Signaturen, Cluster (Node nicht erreichbar, nicht synchron) und ausstehende Updates.
+- Anmeldung am Mail Gateway mit Benutzer und Passwort (Rolle „Auditor“, z. B. `monitor64@pmg`), weil es keine API-Token kennt; das Ticket wird automatisch erneuert. Benutzer mit zweitem Faktor werden mit Hinweis abgelehnt.
+- Neue Schwelle „Mail-Warteschlange: zurückgestellte Mails“ (Warnung ab 100, kritisch ab 500, jeweils über 10 Minuten) im neuen Abschnitt „E-Mail“ der Schwellen; die Dienste stehen in der neuen Kategorie „E-Mail“.
+
+## 0.1.4 – 2026-11-11
+
+- Hängt ein Zugang (Docker-Daemon, PVE-API oder BMC antwortet nicht), wird die Runde nicht mehr verworfen: Der Host wird wie erwartet „nicht erreichbar“ und gemeldet, statt auf dem letzten Stand (oft OK) stehen zu bleiben.
+- Benachrichtigungen: Ein ausdrücklich gewählter Kanal, der zugleich Standardkanal ist, bekommt Meldungen auch dann, wenn „Standardkanäle“ für diese Stufe nicht gewählt ist (bisher gingen sie verloren, im Verlauf stand trotzdem „gemeldet“).
+- Nicht erreichbare Hosts werden wie kritische Dienste erinnert (Standard: täglich), solange das Problem nicht quittiert ist.
+- Nach einem Neustart der Node melden Push-Hosts nicht mehr „unbekannt“, solange ihr Agent noch nicht wieder verbunden ist.
+- Pausieren zeigt den Host sofort als pausiert, auch in Übersicht, Dashboard und Kennzahlen; seine alten Probleme stehen dort nicht mehr.
+- Ein Wert, der bewusst nicht mehr kommt (z. B. CPU einer gestoppten VM), bleibt nicht mehr 7 Tage „unbekannt“, wenn er zuletzt eine Warnung hatte.
+- „Alle neu prüfen“ nach dem Speichern bringt die Hosts nicht mehr dauerhaft in den Gleichschritt (Lastspitzen).
+- „Dienste erkennen“ zählt einen Abbruch der Seite oder einen langsamen Zugang nicht mehr als Ausfall.
+- Prometheus: Das Label `service` trägt den Namen (englisch) statt eines internen Textschlüssels; ebenso die Zeilen im Webhook ohne eigenen Inhalt.
+- Cluster: Eine Quittierung, die eine andere Node gerade überschreibt, geht nicht mehr verloren; bei mehr als 500 Einträgen kommen die neuesten bei den anderen Nodes an; Änderungen während einer langen Sicherung werden nicht mehr verpasst; nach einem Wechsel der Zuständigkeit holt eine Node den Host nicht im 30-Sekunden-Takt zurück (getrennte Verbindung nur zwischen zwei Nodes); ein Schlüsselwechsel wird nicht mehr durch eine vorgehende Uhr einer anderen Node zurückgedreht; abgebrochene Anfragen der Oberfläche und Lesefehler stören den Cluster nicht mehr. Einzelne Nodes ohne Cluster fragen die Datenbank nicht mehr alle 2 s ab.
+- Verlauf: Ein weit zurückliegender Zeitraum (Jahr) zeigt keine falschen Zeiten mehr.
+- Sicherheit: Ändert man Adresse, Art oder Fingerabdruck eines Zugangs, muss das Geheimnis neu eingegeben werden – das gespeicherte geht nicht mehr still an das neue Ziel. Push-Token stehen im Export nicht mehr im Klartext (mit Passwort verschlüsselt, ohne Passwort weggelassen). Ein Push-Agent kann seinen ersten Hostschlüssel nach einem Neuladen des Hosts nicht mehr an einen fremden Token-Inhaber verlieren. Berichte eines Agents sind begrenzt (höchstens 5000 Dienste, 2000 lokale Checks), damit ein manipulierter Host die Datenbank nicht füllt. Fehlversuche am Push-Port zählen auch je IPv6-/48.
+- SNMP: Das Zeitfenster der v3-Traps gilt je Absender (ein Host sperrt nicht mehr die Traps eines anderen; nach einer Stunde Ruhe neu); der Schutz gegen Trap-Fluten leert sich nicht mehr komplett. Die gelernte GETBULK-Grenze (RouterOS) gilt nur noch eine Stunde – ein einzelner Paketverlust drosselt nicht mehr für immer. Zu große GET-Antworten werden in kleineren Teilen nachgefragt. Zähler, die zurückgesetzt statt übergelaufen sind, erzeugen keine Spitze mehr. „Langsamer als sonst“ lernt nach einem Link-Verlust neu und gilt nicht für WLAN. Große Tabellen werden schneller sortiert.
+- Proxmox VE und PBS mit Link-Local-Adresse samt Zone (`fe80::1%eth0`) funktionieren jetzt wirklich.
+- Ein Port in der Adresse des Hosts (SSH, z. B. `nas:2222`) gilt nicht mehr für API-Zugänge ohne eigene URL und für SNMP – wie im Vorschlag der Oberfläche.
+- Docker/Podman: Die CPU-Last bei Podman auf Hosts mit 2 Kernen springt nicht mehr zwischen richtigem und doppeltem Wert.
+- Agent (mit der nächsten Agent-Version): Fehlversuche vor der Anmeldung zählen auch je IPv6-/48.
+- Oberfläche: Im Assistenten gehen Eingaben (Benutzer, Passwort) nicht mehr verloren, wenn die Antwort zur Node-Adresse bzw. zum Push-Token nachkommt. Abweichungen für Gruppen oder Tags mit „|“ im Namen werden richtig gespeichert. Auf der Seite Probleme zeigt ein schnell gewechseltes Problem nicht mehr den Verlauf (und die Knöpfe) eines anderen. Dialoge stapeln keine alten Klick-Handler mehr. Ein kaputter Link `#svc=%` hält das Neuladen der Host-Seite nicht mehr an.
+- Schneller: Skript und Stylesheet werden mit ETag ausgeliefert (unverändert 304 statt jedes Mal 230 KB); die Dashboard-Karte rechnet ohne Datenbank-Abfragen; neue Indizes für „Zuletzt“ und geschlossene Probleme; die Kennung der Node wird nicht mehr je Runde gelesen.
+
+- IPv6 durchgängig: Die Adresse eines Hosts nimmt IPv6 jetzt auch mit Port (`[2001:db8::1]:2222`) an; bisher wurde diese Schreibweise beim Speichern verstümmelt. Ungültige Adressen werden gleich abgelehnt.
+- IPv6 ohne eckige Klammern funktioniert jetzt auch in der Adresse eines Prometheus-Exporters (`fd00::1`) und bei Docker über `tcp://` bzw. `ssh://`; bei `ssh://user@fd00::1` wurde bisher still der letzte Block als Port gelesen.
+- Link-Local-Adressen mit Zone (`fe80::1%eth0`) funktionieren jetzt auch bei den Zugängen über HTTPS (Proxmox VE, Proxmox Backup Server, TrueNAS, Unraid, Server-BMC) und Prometheus.
+- Assistent und Zugangs-Dialog: Die vorgeschlagene URL setzt eine IPv6-Adresse in Klammern und lässt einen Port aus der Adresse des Hosts weg; die weiteren Nodes eines Proxmox-Clusters bekommen damit auch bei einer Adresse mit Port die richtige URL.
+
+## 0.1.3 – 2026-11-11
+
+- Dashboard: eigene Karte mit Hosts, Diensten, nicht erreichbaren Hosts, kritischen Diensten und Warnungen, Wartung und letzter Störung. Die Probleme stehen unter „Letzte Störungen“ in derselben Liste wie die Healthchecks (mit Abzeichen „Monitor64“).
+- Tablet und Smartphone: Die Dienste-Tabelle der Host-Seite passt auf den Bildschirm – Zusatztexte brechen um, Dienstnamen nicht mehr buchstabenweise; die Listenansicht der Übersicht passt auf schmale Bildschirme, „4 Hosts · 93 Dienste“ wird nicht mehr abgeschnitten.
+
+## 0.1.2 – 2026-11-11
+
+- Eigenes Logo (hell und dunkel) in der Übersicht und bei den Modulen.
+- Neue Dienste beim Host: Knöpfe „alle“ und „keine“ über der Auswahl.
+- Docker-Zugang funktioniert auch mit Podman (Docker-kompatible API über `podman.socket`, lokal oder per `ssh://…/run/podman/podman.sock`). Die CPU-Last der Container stimmt dabei: Podman meldet die Systemzeit anders als Docker, bisher zeigte ein Container mit einem belegten Kern bis zu 100 %.
+- SNMP-Traps ausgeschaltet: Der gemerkte Trap-Stand verschwindet sofort, auch wenn gerade eine Abfrage lief (bisher bis zur nächsten Runde).
+- Proxmox Backup Server: Die Befehle im Assistenten geben das Recht `Audit` jetzt auch dem Benutzer – ein PBS-Token darf nur, was auch sein Benutzer darf.
+- SNMP mit MikroTik/RouterOS (z. B. CRS305): Die Ports kommen jetzt. RouterOS verwirft zu große Sammelabfragen still statt sie abzulehnen; Monitor64 fragt dann kleiner und merkt sich die Grenze. Fehlende Werte ohne Angabe, welcher fehlt (RouterOS), machen die Runde nicht mehr „teilweise“.
+
+## 0.1.1 – 2026-11-10
+
+- Übersicht, Ansicht „Liste“: Hosts stehen nach Gruppen zusammen (Gruppenzeile mit Anzahl wie bei den Kacheln). Ein
+  Klick auf eine Spalte sortiert innerhalb jeder Gruppe, und die gewählte Sortierung bleibt beim automatischen
+  Auffrischen erhalten.
+
+## 0.1.0 – 2026-11-10
+
+- Neues Modul: Systeme überwachen mit Schwellen und Verlauf (Plan `docs/PLAN-NODE64-MONITOR64.md`).
+- Zugänge: Monitor64-Agent (Linux), SSH ohne Agent, Proxmox VE, Proxmox Backup Server und Docker per API.
+- Dienste werden erkannt, aber nie automatisch übernommen; verschwundene Dienste bleiben bis „Entfernen“.
+- Schwellen in drei Stufen (Standard, Abweichungen je Gruppe/Tag – oben gewinnt –, dieser Host), Dauer, Hysterese,
+  „GB frei“, Trend „voll in N Tagen“, feste Regeln (SMART, RAID/ZFS, Bonding/LACP, Updates, Gäste/Container).
+- Probleme mit Ablauf und Akteur (Benutzer, API-Key, System), Quittieren, Als gelöst markieren, CSV.
+- Benachrichtigung über die Kanäle der Node: eine Meldung je Host und Runde, Entwarnung an dieselben Kanäle,
+  Erinnerung, Flattern, Ruhezeit mit Sammelmeldung, Abweichungen je Gruppe/Tag.
+- Wartung für Hosts, Gruppen und Tags (jetzt, geplant, wiederkehrend).
+- Verlauf in eigener Datei `monitor64.db` (1 min / 5 min / 1 h), Diagramme mit Zoom.
+- Prometheus-Export unter `/api/metrics`, Konfig-Export/-Import (Geheimnisse nur mit Export-Passwort).
+- Phase 2/3: Agent für Windows (Dienst, PowerShell-Einzeiler) und FreeBSD/OPNsense, Prometheus-Exporter abfragen
+  (node_exporter, windows_exporter, eigene Metriken), Einträge auf den Statusseiten, Regel „Windows-Dienst gestoppt“.
+- Neue Zugänge: NUT (USV), TrueNAS, Unraid, Redfish (Server-BMC); Assistent mit Kacheln für Windows, FreeBSD,
+  TrueNAS, Unraid, Server-BMC, USV und Prometheus; neue Regeln für USV, Gerätemeldungen und Unraid-Parität.
+- Zugang SNMP (v1/v2c/v3, Geräteprofile, eigene OIDs) mit Kacheln „SNMP-Gerät“ und „NAS“; SNMP-Traps (Port einstellbar,
+  sofortige Abfrage bei bekannten Traps, Dienst „Traps“ bis quittiert, unbekannte Absender als Host anlegen); neue
+  Regeln für Neustart, Ports, USV-Alarm, Drucker, Hardware und PoE.
+- Agent im Push-Betrieb für Hosts hinter NAT bzw. VPS (Agent verbindet sich zur Node, Port 6466/TCP, nur offen
+  bei Bedarf); Auswahl „Verbindung“ im Assistenten mit Installationsbefehl.
+- Cluster-Oberfläche: „überwacht von“, bevorzugte und Ersatz-Nodes je Host mit Erreichbarkeitsprüfung, Karte
+  Cluster mit Schlüsselwechsel, Lücken-Hinweis in Diagrammen.
+- Nachbesserungen aus dem Code-Review Phase 2–4: Push-Betrieb robuster (Test zerstört die Anmeldung nicht mehr, keine
+  Übernahme durch Token-Inhaber, Port-Wechsel sicher), Cluster (ausgesetzte Nodes, Schlüsselwechsel ohne Aussperren,
+  eigene Kanäle bleiben, Altersgrenzen), Traps (Ratenbegrenzung je Absender, v3-Zeitfenster, Traps im Cluster),
+  Windows-Installation (vorhandener Ordner, Skript-Ordner, Job-Objekt), USV-Restlaufzeit nur auf Batterie,
+  Statusseiten (Unbekannt, Pausen, wiederkehrende Wartung), nicht vorgeschlagene Dienste übernehmbar.
+- Nachbesserungen aus dem Code-Review: gewollt fehlende Messwerte (gestoppte VM, schlafende Platte) bleiben OK,
+  Erinnerungen gehen nach der Ruhezeit nicht verloren, keine doppelten Meldungen an Standardkanäle,
+  ZFS-Gerätefehler an ONLINE-Pools, Proxmox-Cluster-Dienste von einer überwachten Node, hängende VMs auch bei
+  „darf aus sein“, Tausendertrenner und Hysterese in der angezeigten Einheit.
+- Phase 4 (Backend): Monitor64 im Cluster (Bereiche „Konfiguration“ und „Zustand“): eine zuständige Node je Host
+  mit bevorzugter und Ersatz-Nodes, Übernahme nach 2 min und Rückgabe nach 5 min stabil, Mehrheitsregel bei
+  getrennten Teilen, gemeinsamer Cluster-Schlüssel (Agents werden automatisch umgestellt, „Schlüssel wechseln“),
+  Gesamtübersicht „überwacht von“, Verlauf live von der überwachenden Node, Traps an die zuständige Node.
+- Menüpunkt „Agent“: Die Node hält die signierten Agent-Dateien bereit (Download auch für Hosts ohne Internet), zeigt
+  Installationsbefehle und Agent-Versionen und aktualisiert Agents automatisch (je Host abschaltbar, „Jetzt
+  aktualisieren“).
+- Agent unter FreeBSD, OPNsense, pfSense und TrueNAS CORE per `install.sh` installierbar (rc.d-Dienst, Push-Betrieb).
+- Dienstnamen, Zustands- und Fehlertexte in Deutsch und Englisch (auch in Meldungen, CSV und auf Statusseiten).
+- Cluster: Mini-Verläufe auch für Hosts anderer Nodes; Karte „Hosts ohne überwachende Node“ (zuweisen/entfernen);
+  offene Traps bleiben bei einer Übernahme offen; Änderungen gehen nach einem Schreibfehler im Cluster-Protokoll
+  nicht verloren. Statusseiten: Zeiten, in denen Monitor64 nicht lief, zählen weder als Störung noch als beobachtet.
+- Sicherheit: Bei SSH mit Passwort geht das Passwort erst an den Host, nachdem der Fingerabdruck seines
+  Hostschlüssels bestätigt wurde (Verbindungstest und nach „Hostschlüssel verwerfen“). Aus dem Security-Review: Das
+  gilt jetzt auch im Assistenten „Host hinzufügen“ (ein nur angezeigter, nicht bestätigter Fingerabdruck wird nicht
+  mehr übernommen) und wenn ein Zugang erstmals ein Passwort bekommt; SNMP-v3-Traps müssen mindestens die Stufe des
+  Benutzers haben; Texte von Geräten können die Anzeige nicht mehr über fremde Text-Schlüssel stören.
+- Aus dem Klicktest: RAM von Proxmox-VMs hat eine eigene Regel ohne Standardschwelle (der Wert enthält den Cache
+  des Gastes); fehlt dem Proxmox-Token das Recht für Updates, steht das am Dienst statt als Teilfehler; neue Hosts
+  und Zugänge werden sofort abgefragt, neu auftauchende Dienste sofort angeboten; Pseudo-Dateisysteme (SNMP) und
+  Datei-Mounts (node_exporter im Container) entfallen; Host-Kacheln sind echte Links; Texte ohne Plural-Fehler.
+- Windows-Agent: Dienste mit Starttyp Automatisch, die seit dem Booten nie gestartet wurden, zählen nicht als gestoppt.
+  Die Installation scheitert nicht mehr an einem leeren Ordner `%ProgramData%\monitor64-agent` eines anderen
+  Besitzers; ein Start im Vordergrund mit fehlerhaften Optionen legt diesen Ordner nicht mehr an.
+- Windows-Agent: Symbol im Infobereich der Taskleiste für jeden angemeldeten Benutzer – zeigt, dass der Dienst läuft,
+  die Version, die letzte Abfrage durch die Node und ob ein Update verfügbar ist (abschaltbar mit `-NoTray` bzw.
+  `install --no-tray`).

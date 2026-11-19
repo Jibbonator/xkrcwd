@@ -1,0 +1,179 @@
+package monitor64
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/ipv64net/node64/internal/m64proto"
+	"github.com/ipv64net/node64/internal/monitor64/model/modeltest"
+)
+
+func fsMetric(s *Service, name string) (Metric, bool) {
+	if s == nil {
+		return Metric{}, false
+	}
+	for _, m := range s.Metrics {
+		if m.Name == name {
+			return m, true
+		}
+	}
+	return Metric{}, false
+}
+
+func factText(s *Service, code string) string {
+	if s == nil {
+		return "<kein Dienst>"
+	}
+	for _, f := range s.Facts {
+		if f.Code == code {
+			return modeltest.DE(f.Text)
+		}
+	}
+	return ""
+}
+
+// Inodes gehoeren zum Dateisystem: eigene Schwelle (fs.inodes), kein eigener Dienst; ohne Inode-Grenze (btrfs, FAT)
+// gibt es den Wert nicht.
+func TestMapFSInodes(t *testing.T) {
+	out := MapReport(nil, &m64proto.Report{Time: 1, FS: []m64proto.FS{
+		{Mount: "/", Type: "ext4", Total: 100 << 30, Used: 40 << 30, Avail: 60 << 30, InodesTotal: 1000, InodesFree: 80},
+		{Mount: "/srv", Type: "xfs", Total: 100 << 30, Used: 40 << 30, Avail: 60 << 30, InodesTotal: 1000, InodesFree: 900},
+		{Mount: "/data", Type: "btrfs", Total: 100 << 30, Used: 40 << 30, Avail: 60 << 30},
+	}})
+	root := svcBy(out, "fs:/")
+	in, ok := fsMetric(root, "inodes")
+	if !ok || in.Value != 92 || in.Rule != RuleFSInodes || in.Unit != "%" {
+		t.Errorf("fs:/ inodes = %+v", in)
+	}
+	if u, _ := fsMetric(root, "used"); u.Rule != RuleFS {
+		t.Errorf("fs:/ used = %+v", u)
+	}
+	if txt := modeltest.DE(root.Text); !strings.Contains(txt, "Inodes 92 %") {
+		t.Errorf("fs:/ Text %q", txt)
+	}
+	srv := svcBy(out, "fs:/srv")
+	if in, ok := fsMetric(srv, "inodes"); !ok || in.Value != 10 || strings.Contains(modeltest.DE(srv.Text), "Inodes") {
+		t.Errorf("fs:/srv inodes = %+v, Text %q", in, srv.Text)
+	}
+	if _, ok := fsMetric(svcBy(out, "fs:/data"), "inodes"); ok {
+		t.Error("btrfs ohne Inode-Grenze hat einen Inode-Wert")
+	}
+}
+
+func TestMapBtrfsAndZFS(t *testing.T) {
+	out := MapReport(nil, &m64proto.Report{Time: 1,
+		Btrfs: []m64proto.Btrfs{
+			{UUID: "3f1c8a2e-1111-2222-3333-444455556666", Label: "daten", Profile: "raid1", Devices: 2, Missing: 1, Errors: 13, MetaTotal: 2 << 30, MetaUsed: 1 << 30},
+			{UUID: "9a8b7c6d-1111-2222-3333-444455556666", Profile: "single", Devices: 1},
+		},
+		ZFS: []m64proto.ZPool{{Name: "tank", Health: "ONLINE", Size: 100, Alloc: 50, Free: 50, FragPct: 37}},
+	})
+	b := svcBy(out, "btrfs:daten")
+	if b.Kind != "btrfs" || factText(b, "raid_degraded") != "fehlende Geräte: 1" || factText(b, "device_warn") != "Gerätefehler: 13 (btrfs device stats)" {
+		t.Errorf("btrfs:daten Facts %+v", b.Facts)
+	}
+	if txt := modeltest.DE(b.Text); txt != "raid1 · Geräte: 2 · Metadaten 50 % · fehlende Geräte: 1 · Gerätefehler: 13 (btrfs device stats)" {
+		t.Errorf("btrfs:daten Text %q", txt)
+	}
+	ok := svcBy(out, "btrfs:9a8b7c6d") // ohne Label: Anfang der UUID
+	if len(ok.Facts) != 0 || modeltest.DE(ok.Text) != "single · Geräte: 1" {
+		t.Errorf("btrfs ohne Label: %+v %q", ok.Facts, ok.Text)
+	}
+	z := svcBy(out, "zfs:tank")
+	if f, has := fsMetric(z, "frag"); !has || f.Value != 37 || !strings.Contains(modeltest.DE(z.Text), "Fragmentierung 37 %") {
+		t.Errorf("zfs frag: %+v %q", z.Metrics, z.Text)
+	}
+}
+
+// Raspberry Pi: Unterspannung jetzt ist kritisch, frueher eine Warnung; Drosselung jetzt eine Warnung.
+func TestMapPower(t *testing.T) {
+	for _, tc := range []struct {
+		flags      uint32
+		crit, warn string
+		text       string
+	}{
+		{0, "", "", "in Ordnung"},
+		{0x50005, "Unterspannung – Netzteil und Kabel prüfen", "gedrosselt", "Unterspannung – Netzteil und Kabel prüfen · gedrosselt"},
+		{0x50000, "", "Unterspannung seit dem Start aufgetreten", "Unterspannung seit dem Start aufgetreten · seit dem Start gedrosselt gewesen"},
+		{0x80008, "", "gedrosselt", "gedrosselt"},
+		{0x20000, "", "", "seit dem Start gedrosselt gewesen"},
+	} {
+		out := MapReport(nil, &m64proto.Report{Time: 1, Power: &m64proto.Power{Flags: tc.flags}})
+		s := svcBy(out, "power")
+		if s.Kind != "power" || factText(s, "device_crit") != tc.crit || factText(s, "device_warn") != tc.warn || modeltest.DE(s.Text) != tc.text {
+			t.Errorf("%#x: crit %q warn %q Text %q", tc.flags, factText(s, "device_crit"), factText(s, "device_warn"), modeltest.DE(s.Text))
+		}
+	}
+	if out := MapReport(nil, &m64proto.Report{Time: 1}); len(out) != 0 {
+		t.Errorf("ohne Pi: %+v", out)
+	}
+}
+
+// Issue #84: Zwei Platten an gleichen USB-Adaptern melden in /sys dieselbe Seriennummer (die des Adapters). Sie
+// duerfen nicht zu einem Dienst zusammenfallen: Schluessel ist dann die Seriennummer aus SMART bzw. der Geraetename.
+func TestMapDisksSharedSerial(t *testing.T) {
+	disks := []m64proto.DiskIO{
+		{Name: "mmcblk0", Serial: "0x1234abcd"},
+		{Name: "sda", Serial: "DD564198838B0", Model: "USB3.0 SATA"},
+		{Name: "sdb", Serial: "DD564198838B0", Model: "USB3.0 SATA"},
+	}
+	out := MapReport(nil, &m64proto.Report{Time: 1, Disks: disks})
+	if svcBy(out, "disk:sda") == nil || svcBy(out, "disk:sdb") == nil || svcBy(out, "disk:DD564198838B0") != nil || svcBy(out, "disk:0x1234abcd") == nil {
+		t.Fatalf("ohne SMART: %v", keysOf(out))
+	}
+	// mit SMART: die echten Seriennummern; fuer sdb hat der Agent die Adapter-Seriennummer eingetragen (kein SMART lesbar)
+	out = MapReport(nil, &m64proto.Report{Time: 1, Disks: disks, SMART: []m64proto.SMART{
+		{Device: "/dev/sda", Serial: "S4EVNX0N123456", Model: "Samsung SSD 860", Passed: bptr(true)},
+		{Device: "/dev/sdb", Serial: "DD564198838B0", Error: "nicht lesbar"},
+	}})
+	a, b := svcBy(out, "disk:S4EVNX0N123456"), svcBy(out, "disk:sdb")
+	if a == nil || b == nil || len(out) != 3 {
+		t.Fatalf("mit SMART: %v", keysOf(out))
+	}
+	// eine Platte allein behaelt die Seriennummer aus /sys als Schluessel (wie bisher)
+	out = MapReport(nil, &m64proto.Report{Time: 1, Disks: disks[:2]})
+	if svcBy(out, "disk:DD564198838B0") == nil {
+		t.Fatalf("einzelne Platte: %v", keysOf(out))
+	}
+}
+
+func keysOf(l []Service) []string {
+	var k []string
+	for _, s := range l {
+		k = append(k, s.Key)
+	}
+	return k
+}
+
+// macOS (#114): Hilfsvolumes und fluechtige Mounts werden angeboten, aber nicht vorausgewaehlt; Datenvolume, / und
+// externe Laufwerke schon.
+func TestMapFSMacAux(t *testing.T) {
+	fs := func(mount string) m64proto.FS {
+		return m64proto.FS{Mount: mount, Type: "apfs", Total: 500 << 30, Used: 200 << 30, Avail: 300 << 30}
+	}
+	want := map[string]bool{
+		"/": true, "/System/Volumes/Data": true, "/Volumes/Backup": true, "/Volumes/USB Stick": true,
+		"/System/Volumes/VM": false, "/System/Volumes/Preboot": false, "/System/Volumes/Update": false,
+		"/System/Volumes/xarts": false, "/System/Volumes/iSCPreboot": false, "/System/Volumes/Hardware": false,
+		"/System/Volumes/Recovery": false, "/System/Volumes/Update/mnt1": false,
+		"/Library/Developer/CoreSimulator/Volumes/iOS_23A343":                           false,
+		"/Volumes/.timemachine/1A2B3C4D/2026-11-01-120000.backup":                       false,
+		"/Volumes/com.apple.TimeMachine.localsnapshots/Backups.backupdb/Mac/2026-11-01": false,
+		"/private/var/folders/xy/abc/T/AppTranslocation/1234":                           false,
+	}
+	var in []m64proto.FS
+	for m := range want {
+		in = append(in, fs(m))
+	}
+	out := MapReport(nil, &m64proto.Report{Time: 1, FS: in})
+	for m, def := range want {
+		s := svcBy(out, "fs:"+m)
+		if s == nil {
+			t.Errorf("%s fehlt", m)
+			continue
+		}
+		if s.Default != def {
+			t.Errorf("%s: Default %t, erwartet %t", m, s.Default, def)
+		}
+	}
+}

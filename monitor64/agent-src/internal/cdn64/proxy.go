@@ -1,0 +1,1504 @@
+package cdn64
+
+import (
+	"bufio"
+	"context"
+	"crypto/tls"
+	"errors"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"net/http/httputil"
+	"net/netip"
+	"net/url"
+	"path"
+	"slices"
+	"sort"
+	"strconv"
+	"strings"
+	"sync/atomic"
+	"time"
+	"unicode"
+
+	"github.com/ipv64net/node64/internal/dns64/localnet"
+	"github.com/ipv64net/node64/internal/edge"
+	"github.com/ipv64net/node64/internal/httpcompress"
+)
+
+// Der Proxy eines Hosts: httputil.ReverseProxy (WebSockets, Streaming, HTTP/2 kommen von Go selbst), davor
+// Exploit-Sperre, Asset-Cache, HSTS, Schleifenschutz und Zaehler.
+
+const loopHeader = "X-Node64-Proxy"
+
+// hostStats zaehlt seit dem Start des Moduls.
+type hostStats struct {
+	requests atomic.Int64
+	errors   atomic.Int64 // 5xx und nicht erreichbar
+	blocked  atomic.Int64 // Block Common Exploits, Blocklisten, Limits
+}
+
+func (m *Module) statsOf(id int64) *hostStats {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	st := m.stats[id]
+	if st == nil {
+		st = &hostStats{}
+		m.stats[id] = st
+	}
+	return st
+}
+
+// newTransport: Verbindungen zu den Zielen (mit bzw. ohne Pruefung des Ziel-Zertifikats) mit dem Protokoll
+// zum Ziel (#53): automatisch = HTTP/1.1 und HTTP/2 (https: per ALPN; http bleibt HTTP/1.1), h1 = nur HTTP/1.1,
+// h2c = nur HTTP/2 (http: mit Vorwissen ohne TLS). Eigener Dialer, aber kein eigener TLS-Dialer: ALPN macht Go selbst.
+func newTransport(verify bool, mode string) *http.Transport {
+	d := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	p := new(http.Protocols)
+	switch mode {
+	case TargetHTTP1:
+		p.SetHTTP1(true)
+	case TargetH2C:
+		p.SetHTTP2(true)
+		p.SetUnencryptedHTTP2(true)
+	default:
+		p.SetHTTP1(true)
+		p.SetHTTP2(true)
+	}
+	return &http.Transport{
+		Proxy:                 nil,
+		DialContext:           d.DialContext,
+		TLSClientConfig:       &tls.Config{InsecureSkipVerify: !verify, MinVersion: tls.VersionTLS12}, //nolint:gosec // Heimnetz-Ziele oft selbstsigniert, abschaltbar je Host
+		MaxIdleConns:          256,
+		MaxIdleConnsPerHost:   32,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: time.Second,
+		Protocols:             p,
+		// HTTP/2: tote Verbindungen (NAT, Neustart des Ziels) erkennen, auch unter langen gRPC-Streams
+		HTTP2: &http.HTTP2Config{SendPingTimeout: 30 * time.Second, PingTimeout: 15 * time.Second},
+	}
+}
+
+// transport: geteilter Transport je Pruefung des Zertifikats und Protokoll (automatisch: trVerify bzw. trInsecure).
+func (m *Module) transport(verify bool, mode string) *http.Transport {
+	if mode == TargetHTTPAuto {
+		if verify {
+			return m.trVerify
+		}
+		return m.trInsecure
+	}
+	key := mode + "|" + strconv.FormatBool(verify)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.trProto == nil {
+		m.trProto = map[string]*http.Transport{}
+	}
+	tr := m.trProto[key]
+	if tr == nil {
+		tr = newTransport(verify, mode)
+		m.trProto[key] = tr
+	}
+	return tr
+}
+
+// idleCloser: Transport, dessen ruhende Verbindungen sich schliessen lassen (hostTr).
+type idleCloser interface {
+	http.RoundTripper
+	CloseIdleConnections()
+}
+
+// upgradeSplit: automatisch, h2c bzw. nur HTTP/2 - WebSocket und andere Upgrades (SPDY von kubectl, "tcp" der
+// Docker-API) gibt es nur mit HTTP/1.1, sie gehen ueber h1 (Go erzwingt HTTP/1.1 von sich aus nur fuer WebSocket).
+type upgradeSplit struct{ h2, h1 *http.Transport }
+
+func (s upgradeSplit) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.Header.Get("Upgrade") != "" {
+		return s.h1.RoundTrip(r)
+	}
+	return s.h2.RoundTrip(r)
+}
+
+func (s upgradeSplit) CloseIdleConnections() {
+	s.h2.CloseIdleConnections()
+	s.h1.CloseIdleConnections()
+}
+
+// targetTransport: Transport zu einem Ziel - geteilt ohne Timeout, sonst ein eigener unter key in hostTr (die
+// Verbindungen des vorigen Transports unter key werden geschlossen: Aenderungen wirken nach dem Speichern).
+func (m *Module) targetTransport(key int64, verify bool, mode string, timeout int) http.RoundTripper {
+	if timeout <= 0 {
+		if mode == TargetHTTP1 {
+			return m.transport(verify, mode)
+		}
+		return upgradeSplit{h2: m.transport(verify, mode), h1: m.transport(verify, TargetHTTP1)}
+	}
+	mk := func(mode string) *http.Transport {
+		tr := newTransport(verify, mode)
+		tr.ResponseHeaderTimeout = time.Duration(timeout) * time.Second
+		return tr
+	}
+	var tr idleCloser = mk(mode)
+	if mode != TargetHTTP1 {
+		tr = upgradeSplit{h2: tr.(*http.Transport), h1: mk(TargetHTTP1)}
+	}
+	m.mu.Lock()
+	if old := m.hostTr[key]; old != nil {
+		old.CloseIdleConnections()
+	}
+	m.hostTr[key] = tr
+	m.mu.Unlock()
+	return tr
+}
+
+// inner: was ein Host tut (Proxy, Weiterleitung, 404, Statusseite).
+func (m *Module) inner(h *Host, st *hostStats) http.Handler {
+	switch h.Kind {
+	case KindRedirect:
+		return redirectHandler(h)
+	case KindDead:
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { page(w, http.StatusNotFound) })
+	case KindStatus:
+		return m.statusHandler(h)
+	}
+	return m.proxyHandler(h, st)
+}
+
+// redirectHandler leitet weiter (Schema "auto" = wie die Anfrage).
+func redirectHandler(h *Host) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		scheme := h.RedirectScheme
+		if scheme != "http" && scheme != "https" {
+			scheme = "http"
+			if r.TLS != nil {
+				scheme = "https"
+			}
+		}
+		target := scheme + "://" + h.RedirectTarget
+		if h.PreservePath {
+			target += r.URL.RequestURI()
+		} else if !strings.Contains(h.RedirectTarget, "/") {
+			target += "/"
+		}
+		http.Redirect(w, r, target, h.RedirectCode)
+	})
+}
+
+// transportFor: geteilte Verbindungen, mit eigenem Timeout nur fuer Hosts, die einen eingestellt haben.
+func (m *Module) transportFor(h *Host) http.RoundTripper {
+	return m.targetTransport(h.ID, h.VerifyTarget, h.Advanced.TargetHTTP, h.Advanced.TimeoutSeconds)
+}
+
+// locTransport: eigener Timeout bzw. eigenes Protokoll einer Location (Schluessel neben den Hosts negativ, je Location
+// eine Verbindung); sonst die des Hosts (base).
+func (m *Module) locTransport(h *Host, i int, l *Location, base http.RoundTripper) http.RoundTripper {
+	mode := l.Advanced.targetHTTP(h.Advanced.TargetHTTP)
+	timeout := 0
+	if l.Advanced != nil {
+		timeout = l.Advanced.TimeoutSeconds
+	}
+	if timeout <= 0 && mode == h.Advanced.TargetHTTP {
+		return base
+	}
+	if timeout <= 0 { // nur das Protokoll ist eigen: Timeout wie der Host
+		timeout = h.Advanced.TimeoutSeconds
+	}
+	return m.targetTransport(-(h.ID*100 + int64(i) + 1), h.VerifyTarget, mode, timeout)
+}
+
+// target ist ein Ziel des Proxys (der Host selbst oder eine Location).
+type target struct {
+	url     *url.URL
+	prefix  string // Location: Pfad beim Besucher
+	forward string // Pfad beim Ziel ("" = unveraendert; beim Host Advanced.TargetPath)
+}
+
+// ctxInKey: Anfrage des Besuchers im Kontext der ausgehenden Anfrage (fuer ModifyResponse: resp.Request ist die
+// ausgehende mit Pfad und Host beim Ziel).
+type ctxInKey struct{}
+
+// visitorReq: Anfrage des Besuchers zu einer Antwort des Ziels (ohne gemerkte die ausgehende).
+func visitorReq(resp *http.Response) *http.Request {
+	if resp.Request == nil {
+		return nil
+	}
+	if in, ok := resp.Request.Context().Value(ctxInKey{}).(*http.Request); ok {
+		return in
+	}
+	return resp.Request
+}
+
+// unpath: Weiterleitungen und Cookie-Pfade des Ziels zurueck auf den Pfad beim Besucher (forward -> prefix, wie
+// proxy_redirect und proxy_cookie_path bei nginx). Eine absolute Adresse auf das Ziel selbst wird dabei relativ.
+// Nur fuer den Pfad beim Ziel des Hosts (Advanced.TargetPath); Locations mit ForwardPath bleiben wie vor 1.4.0.
+func unpath(resp *http.Response, t target) {
+	fw := strings.TrimSuffix(t.forward, "/")
+	back := func(p string) (string, bool) {
+		if p != fw && !strings.HasPrefix(p, fw+"/") {
+			return p, false
+		}
+		out := t.prefix + strings.TrimPrefix(p, fw)
+		if out == "" {
+			out = "/"
+		}
+		return out, true
+	}
+	if loc := resp.Header.Get("Location"); loc != "" {
+		if u, err := url.Parse(loc); err == nil && u.Opaque == "" && strings.HasPrefix(u.Path, "/") {
+			in := visitorReq(resp)
+			own := u.Host == "" || in != nil && strings.EqualFold(u.Host, in.Host)
+			internal := u.Host != "" && strings.EqualFold(u.Host, t.url.Host)
+			// auf dem kodierten Pfad rechnen (%2F bleibt kodiert); "//x" bzw. "/\x" waere eine Adresse auf einen
+			// fremden Host (offene Weiterleitung) - dann die Location des Ziels unveraendert lassen
+			np, ok := back(u.EscapedPath())
+			p, perr := url.PathUnescape(np)
+			if ok && perr == nil && (own || internal) && !strings.HasPrefix(np, "//") && !strings.HasPrefix(p, "//") &&
+				!strings.HasPrefix(p, "/\\") {
+				u.Path, u.RawPath = p, np
+				if internal { // interne Adresse des Ziels: relativ zum Namen des Besuchers
+					u.Scheme, u.Host = "", ""
+				}
+				resp.Header.Set("Location", u.String())
+			}
+		}
+	}
+	cs := resp.Header.Values("Set-Cookie")
+	for i, c := range cs {
+		parts := strings.Split(c, ";")
+		for j := 1; j < len(parts); j++ {
+			k, v, ok := strings.Cut(strings.TrimSpace(parts[j]), "=")
+			if !ok || !strings.EqualFold(k, "path") {
+				continue
+			}
+			if np, ok := back(v); ok {
+				parts[j] = " Path=" + np
+				cs[i] = strings.Join(parts, ";")
+			}
+		}
+	}
+}
+
+// rejLocation: Pfad gesperrt (Location "sperren" bzw. "nur Locations" des Hosts).
+const rejLocation = "location"
+
+// fixedHandler: Location ohne Ziel - gesperrt (Fehlerseite) bzw. feste Antwort (#11).
+func fixedHandler(l Location) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if l.Action == LocBlock {
+			setReject(r, rejLocation)
+			page(w, l.Status)
+			return
+		}
+		w.Header().Set("Content-Type", l.ContentType)
+		w.Header().Set("Content-Length", strconv.Itoa(len(l.Body)))
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		if l.Status >= 500 { // feste 5xx soll so beim Besucher ankommen (CDN64 Modus 2)
+			keepOwnPage(w.Header())
+		}
+		w.WriteHeader(l.Status)
+		if r.Method != http.MethodHead {
+			_, _ = io.WriteString(w, l.Body)
+		}
+	})
+}
+
+// locAt: Location mit dem laengsten passenden Praefix (nil = der Host selbst).
+func locAt(h *Host, p string) *Location {
+	p, _ = reqPath(p)
+	var best *Location
+	for i := range h.Locations {
+		if pre := path.Clean(h.Locations[i].Path); pathIn(p, pre) && (best == nil || len(pre) > len(path.Clean(best.Path))) {
+			best = &h.Locations[i]
+		}
+	}
+	return best
+}
+
+// maxBodyAt: Upload-Grenze am Pfad in Bytes (Location vor Host, 0 = unbegrenzt).
+func maxBodyAt(h *Host, p string) int64 {
+	mb := h.Advanced.MaxBodyMB
+	if l := locAt(h, p); l != nil && l.Advanced != nil {
+		switch {
+		case l.Advanced.MaxBodyMB < 0:
+			mb = 0
+		case l.Advanced.MaxBodyMB > 0:
+			mb = l.Advanced.MaxBodyMB
+		}
+	}
+	return int64(mb) << 20
+}
+
+// reverseProxy baut den Proxy zu einem Ziel mit den Optionen adv (Host bzw. Host mit den Werten der Location).
+func (m *Module) reverseProxy(t target, st *hostStats, tr http.RoundTripper, adv *Advanced) http.Handler {
+	token := m.loopToken
+	host := t.prefix == "" // der Host selbst (keine Location)
+	// Besucher-Anfrage merken: Rueckschreiben (Host, Pfad), {{HOST}} der Fehlerseite und robots.txt brauchen sie
+	keepIn := host && (t.forward != "" || adv.AIRobots) || adv.ErrorOverride && adv.ErrorHTML != ""
+	join := func(fw, in string) string {
+		rest := stripSegs(in, strings.Count(t.prefix, "/")) // Location: Abschnitte ihres Pfads, Host: nur der erste /
+		if rest != "" || strings.HasSuffix(in, "/") {
+			return strings.TrimSuffix(fw, "/") + "/" + rest
+		}
+		return fw
+	}
+	escForward := (&url.URL{Path: t.forward}).EscapedPath()
+	rp := &httputil.ReverseProxy{
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.SetURL(t.url)
+			if t.forward != "" { // /api/x -> /v1/x (vom bereinigten Pfad: ohne Punkt-Segmente, kein Weg aus forward heraus)
+				in, _ := reqPath(pr.In.URL.Path)
+				pr.Out.URL.Path = join(t.forward, in)
+				pr.Out.URL.RawPath = ""
+				if host { // Pfad beim Ziel des Hosts: Kodierung bleibt (%2F), Punkt-Segmente hat proxyHandler abgewiesen
+					ein, _ := reqPath(pr.In.URL.EscapedPath())
+					raw := join(escForward, ein)
+					if p, err := url.PathUnescape(raw); err == nil {
+						pr.Out.URL.Path, pr.Out.URL.RawPath = p, raw
+					}
+				}
+			}
+			switch adv.HostHeader {
+			case "": // wie NPM: das Ziel sieht den Namen, unter dem der Besucher kam
+				pr.Out.Host = pr.In.Host
+			case "target": // Name des Ziels (SetURL)
+			default:
+				pr.Out.Host = adv.HostHeader
+			}
+			pr.SetXForwarded() // mitgeschickte X-Forwarded-* verwirft Rewrite; For danach mit der echten Client-IP
+			if ip := clientOf(pr.In); ip.IsValid() {
+				pr.Out.Header.Set("X-Forwarded-For", ip.String())
+				pr.Out.Header.Set("X-Real-IP", ip.String())
+			}
+			for _, n := range adv.RequestRemove {
+				if !ownHeaders[strings.ToLower(n)] { // auch aeltere gespeicherte Einstellungen
+					pr.Out.Header.Del(n)
+				}
+			}
+			for _, x := range adv.RequestHeaders {
+				if !fixedHeaders[strings.ToLower(x.Name)] {
+					pr.Out.Header.Set(x.Name, x.Value)
+				}
+			}
+			pr.Out.Header.Set(loopHeader, token)
+			if keepIn {
+				pr.Out = pr.Out.WithContext(context.WithValue(pr.Out.Context(), ctxInKey{}, pr.In))
+			}
+		},
+		Transport: tr,
+		ErrorLog:  log.New(io.Discard, "", 0),
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			status := http.StatusBadGateway
+			var mbe *http.MaxBytesError
+			if errors.As(err, &mbe) {
+				status = http.StatusRequestEntityTooLarge
+			} else if errors.Is(r.Context().Err(), context.Canceled) {
+				// Besucher hat abgebrochen (Issue 120): kein Fehler des Ziels, nichts schreiben - statusWriter.code
+				// meldet 499 wie nginx, zaehlt als 4xx statt 5xx
+				return
+			}
+			st.errors.Add(1)
+			if !errors.Is(err, context.Canceled) {
+				m.log.Debug("target not reachable", "host", r.Host, "target", t.url.Host, "err", err)
+			}
+			hostPage(w, r, adv, status)
+		},
+	}
+	rp.ModifyResponse = func(resp *http.Response) error {
+		markTarget(resp.Request)
+		if host && t.forward != "" {
+			unpath(resp, t)
+		}
+		if !grpcResp(resp) {
+			overrideErr(adv, resp) // eigene Fehlerseite statt 5xx des Ziels (vor dem Cache: wird nie gespeichert)
+		}
+		if host {
+			m.aiRobots(adv, resp) // robots.txt mit KI-Sperre, wenn das Ziel keine hat
+		}
+		httpcompress.TrackBody(resp) // Cache: nur ganz gelesene Antworten
+		for _, n := range adv.ResponseRemove {
+			resp.Header.Del(n)
+		}
+		for _, x := range adv.ResponseHeaders {
+			resp.Header.Set(x.Name, x.Value)
+		}
+		return nil
+	}
+	if adv.NoBuffering {
+		rp.FlushInterval = -1
+	}
+	return rp
+}
+
+// grpcReq: gRPC bzw. gRPC-Web (Content-Type application/grpc...): Rahmen mit Trailern (grpc-status), lange Streams
+// in beide Richtungen - weder komprimieren noch durch die eigene Fehlerseite ersetzen.
+func grpcReq(r *http.Request) bool {
+	return r != nil && strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "application/grpc")
+}
+
+// grpcResp: das Ziel antwortet mit gRPC (nicht der Besucher behauptet es: den Kopf der Anfrage kann jeder setzen).
+func grpcResp(resp *http.Response) bool {
+	return resp != nil && strings.HasPrefix(strings.ToLower(resp.Header.Get("Content-Type")), "application/grpc")
+}
+
+// compress: Komprimierung der Antworten (Erweitert), ausser bei gRPC (Clients erwarten die Rahmen unveraendert).
+func compress(next http.Handler, opt httpcompress.Options) http.Handler {
+	c := httpcompress.Handler(next, opt)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if grpcReq(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		c.ServeHTTP(w, r)
+	})
+}
+
+// route ist ein Pfad eines Hosts mit eigenem Proxy und eigener Zugriffsliste.
+type route struct {
+	prefix string // "" = Host selbst
+	key    string // pathKey(prefix)
+	strict bool   // Zugriffsliste bzw. sperren/feste Antwort: gewinnt bei gleichem key (pickRoute)
+	ws     bool
+	acl    int64
+	deny   string // Weiterleitung bei verweigertem Zugriff (#55), "" = Fehlerseite
+	next   http.Handler
+}
+
+// proxyHandler baut den Reverse-Proxy eines Hosts mit seinen Locations (laengster Praefix gewinnt).
+func (m *Module) proxyHandler(h *Host, st *hostStats) http.Handler {
+	tr := m.transportFor(h)
+	mk := func(scheme, host string, port int) *url.URL {
+		return &url.URL{Scheme: scheme, Host: net.JoinHostPort(host, strconv.Itoa(port))}
+	}
+	var next http.Handler = m.reverseProxy(target{url: mk(h.Scheme, h.TargetHost, h.TargetPort), forward: h.Advanced.TargetPath}, st, tr, &h.Advanced)
+	if h.Advanced.OnlyLocations { // nur die Locations (#11): alles andere wie ein unbekannter Pfad
+		next = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			setReject(r, rejLocation)
+			page(w, http.StatusNotFound)
+		})
+	}
+	if h.Advanced.Gzip { // vor dem Cache: der legt die fertig komprimierte Fassung ab (was er ablegt, staerker)
+		next = compress(next, httpcompress.Options{Static: func(r *http.Request, hd http.Header) bool {
+			return h.CacheAssets && r.Method == http.MethodGet && cacheable(r) && httpcompress.StaticExt(r.URL.Path) && storable(r, hd)
+		}})
+	}
+	if h.CacheAssets {
+		next = m.cache.cached(h.ID, next)
+	}
+	routes := []route{{ws: h.WebSockets, acl: h.AccessListID, next: next}}
+	for i, l := range h.Locations {
+		prefix := path.Clean(l.Path)
+		var ln http.Handler
+		if l.Action != LocProxy {
+			ln = fixedHandler(l)
+		} else {
+			la := l.effective(&h.Advanced)
+			ln = m.reverseProxy(target{url: mk(l.Scheme, l.TargetHost, l.TargetPort), prefix: prefix, forward: l.ForwardPath}, st, m.locTransport(h, i, &l, tr), &la)
+			if h.Advanced.Gzip {
+				ln = compress(ln, httpcompress.Options{})
+			}
+		}
+		acl := l.AccessListID
+		if acl == 0 {
+			acl = h.AccessListID
+		}
+		deny := l.DeniedRedirect
+		if deniedLoop(h.Names, h.Locations, &l) { // beim Speichern schon abgelehnt; hier nur zur Sicherheit
+			deny = ""
+		}
+		routes = append(routes, route{prefix: prefix, key: pathKey(prefix), strict: acl > 0 || l.Action != LocProxy, ws: l.WebSockets,
+			acl: acl, deny: deny, next: ln})
+	}
+	// laengster key zuerst, gleiche keys nebeneinander (pickRoute)
+	sort.SliceStable(routes, func(i, j int) bool {
+		if len(routes[i].key) != len(routes[j].key) {
+			return len(routes[i].key) > len(routes[j].key)
+		}
+		return routes[i].key < routes[j].key
+	})
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Route nach dem bereinigten Pfad (//admin, %2e-Segmente); das Ziel bekommt den Pfad unveraendert (wie nginx).
+		// Gross-/Kleinschreibung, Parameter und Leerzeichen/Punkte am Ende zaehlen dabei nicht (pathIn).
+		p, ok := reqPath(r.URL.Path)
+		if !ok {
+			page(w, http.StatusBadRequest)
+			return
+		}
+		if strings.HasPrefix(p, "/.node64/") && m.loginRoute(w, r, h, routes, p) {
+			return
+		}
+		rt := &routes[len(routes)-1]
+		var pk string
+		if len(routes) > 1 { // ohne Locations nur die Route des Hosts: kein Schluessel noetig
+			pk = pathKey(p)
+		}
+		for i := range routes {
+			if routes[i].prefix == "" || keyIn(pk, routes[i].key) {
+				rt = pickRoute(routes[i:], p)
+				break
+			}
+		}
+		if !rt.ws && r.Header.Get("Upgrade") != "" {
+			r.Header.Del("Upgrade")
+			r.Header.Del("Connection")
+		}
+		if !m.allowedOr(w, r, h, rt.acl, rt.deny) {
+			return
+		}
+		if rt.acl > 0 { // Cache: geschuetzte Antworten nie "public" (cache.go)
+			r = r.WithContext(context.WithValue(r.Context(), ctxProtectedKey{}, m.aclPersonal(rt.acl)))
+		}
+		if hasLoginCookie(r) { // Sitzungs-Cookies der Login-Listen dieses Hosts gehen an kein Ziel (auch nicht ans offene)
+			for _, g := range m.loginGuards(routes) {
+				stripLoginCookie(r, g.list.ID)
+			}
+		}
+		// Wartungsmodus: Wartungsseite statt Ziel (im Log als "Wartung", nicht als Fehler des Ziels) - erst nach der
+		// Zugriffsliste, damit eigenes HTML nicht ohne Anmeldung abrufbar ist (#33); die Anmeldeseite geht weiter
+		if h.Advanced.Maintenance {
+			setReject(r, rejMaintenance)
+			serveMaint(w, r, &h.Advanced)
+			return
+		}
+		if h.Advanced.NextcloudDAV && rt.prefix == "" && davWellKnown(p) { // Nextcloud (#101); eine eigene Location geht vor
+			http.Redirect(w, r, davTarget, http.StatusMovedPermanently)
+			return
+		}
+		rt.next.ServeHTTP(w, r)
+	})
+}
+
+// davTarget: Ziel der Nextcloud-Weiterleitungen (relativ: Schema, Name und Port bleiben die des Besuchers).
+const davTarget = "/remote.php/dav/"
+
+// davWellKnown: Pfad der CalDAV- bzw. CardDAV-Erkennung (RFC 6764), mit oder ohne Schraegstrich am Ende.
+func davWellKnown(p string) bool {
+	p = strings.TrimSuffix(strings.ToLower(p), "/")
+	return p == "/.well-known/caldav" || p == "/.well-known/carddav"
+}
+
+// pickRoute: routes[0] passt; unter den folgenden Routen mit gleichem key (vor 1.54.1 gespeichert, z. B. /admin und
+// /Admin) gewinnt die buchstabengenau passende, sonst die strengere.
+func pickRoute(routes []route, p string) *route {
+	best := &routes[0]
+	for i := range routes {
+		r := &routes[i]
+		if r.prefix == "" || r.key != routes[0].key {
+			break
+		}
+		if p == r.prefix || strings.HasPrefix(p, r.prefix+"/") {
+			return r
+		}
+		if r.strict && !best.strict {
+			best = r
+		}
+	}
+	return best
+}
+
+// reqPath: Pfad fuer die Wahl der Route, doppelte Schraegstriche zusammengefasst (Schraegstrich am Ende bleibt);
+// ok = false bei Punkt-Segmenten ("." und "..", auch kodiert oder mit Backslash), die Browser nie schicken - auch in
+// Formen, die ein Ziel wie ".." lesen kann ("..;", ".. ", "...": Tomcat bzw. IIS/Windows), sonst ginge es aus dem
+// Pfad beim Ziel heraus.
+func reqPath(p string) (string, bool) {
+	if !strings.HasPrefix(p, "/") {
+		return p, true
+	}
+	for _, s := range strings.FieldsFunc(p, func(c rune) bool { return c == '/' || c == '\\' }) {
+		if dotSeg(s) {
+			return "", false
+		}
+	}
+	c := path.Clean(p)
+	if c != "/" && strings.HasSuffix(p, "/") {
+		c += "/"
+	}
+	return c, true
+}
+
+// pathIn: Pfad liegt unter dem Praefix einer Location. Verglichen wird ueber pathKey: sonst liefen /ADMIN, "/admin "
+// oder /admin;x an Zugriffsliste bzw. Sperre von /admin vorbei, wenn das Ziel sie wie /admin behandelt (IIS,
+// Windows-Freigaben, Tomcat). Das Ziel bekommt den Pfad weiter unveraendert.
+func pathIn(p, prefix string) bool { return keyIn(pathKey(p), pathKey(prefix)) }
+
+// keyIn: wie pathIn mit schon gebildeten Schluesseln.
+func keyIn(pk, key string) bool { return pk == key || strings.HasPrefix(pk, key+"/") }
+
+// stripSegs: Pfad ohne seine ersten n Abschnitte (/ und \ trennen wie bei pathKey) - der Rest hinter einer Location,
+// auch wenn der Besucher ihren Pfad anders schreibt (/API/x, /api./x unter /api).
+// Gezaehlt wird wie bei pathKey: leere Abschnitte und reine Parameter (/\api, /;x/api) zaehlen nicht.
+func stripSegs(p string, n int) string {
+	sep := func(c byte) bool { return c == '/' || c == '\\' }
+	i := 0
+	for n > 0 {
+		for i < len(p) && sep(p[i]) {
+			i++
+		}
+		if i >= len(p) {
+			return ""
+		}
+		j := i
+		for j < len(p) && !sep(p[j]) {
+			j++
+		}
+		if segKey(p[i:j]) != "" {
+			n--
+		}
+		i = j
+	}
+	if i < len(p) && sep(p[i]) {
+		i++
+	}
+	if i >= len(p) {
+		return ""
+	}
+	return p[i:]
+}
+
+// pathKey: Pfad fuer den Vergleich mit Locations - klein, \ wie / (IIS), je Abschnitt ohne Parameter (;…),
+// NTFS-Stream (::…) und ohne Leerzeichen bzw. Punkte am Ende; leere Abschnitte fallen weg (/\admin, //admin und
+// /;x/admin sind beim Ziel /admin).
+func pathKey(p string) string {
+	segs := strings.Split(strings.ReplaceAll(p, "\\", "/"), "/")
+	out := segs[:0]
+	for i, s := range segs {
+		if k := segKey(s); k != "" || i == 0 {
+			out = append(out, k)
+		}
+	}
+	k := strings.Join(out, "/")
+	if k == "" && strings.HasPrefix(p, "/") {
+		k = "/"
+	}
+	// erst gross, dann klein: auch Zeichen, die gross zu ASCII werden (U+017F -> S), wie IIS/.NET vergleichen
+	return strings.ToLower(strings.ToUpper(k))
+}
+
+// dotSeg: Abschnitt, den ein Ziel als "." bzw. ".." lesen kann ("..", "..;x", ".. ", "...", "..::$DATA"). Ein
+// Abschnitt aus nur Parametern (";jsessionid=..." von Tomcat/Jetty) zaehlt nicht dazu.
+func dotSeg(s string) bool {
+	if j := strings.IndexByte(s, ';'); j >= 0 {
+		s = s[:j]
+	}
+	if j := strings.Index(s, "::"); j >= 0 {
+		s = s[:j]
+	}
+	return s != "" && strings.TrimRightFunc(s, func(r rune) bool { return r == '.' || unicode.IsSpace(r) }) == ""
+}
+
+// segKey: ein Abschnitt ohne Parameter (;...), NTFS-Stream (::...) und ohne Punkte bzw. Leerzeichen am Ende.
+func segKey(s string) string {
+	if j := strings.IndexByte(s, ';'); j >= 0 {
+		s = s[:j]
+	}
+	if j := strings.Index(s, "::"); j >= 0 {
+		s = s[:j]
+	}
+	return strings.TrimRightFunc(s, func(r rune) bool { return r == '.' || unicode.IsSpace(r) })
+}
+
+// wsAt: WebSockets am Pfad erlaubt (Host bzw. die Location mit dem laengsten passenden Praefix).
+func wsAt(h *Host, p string) bool {
+	p, _ = reqPath(p)
+	ws, best := h.WebSockets, 0
+	for _, l := range h.Locations {
+		if pre := path.Clean(l.Path); len(pre) > best && pathIn(p, pre) {
+			ws, best = l.WebSockets, len(pre)
+		}
+	}
+	return ws
+}
+
+// wsUpgrade: echte WebSocket-Anfrage (Upgrade: websocket mit Connection: upgrade).
+func wsUpgrade(r *http.Request) bool {
+	return headerToken(r.Header, "Upgrade", "websocket") && headerToken(r.Header, "Connection", "upgrade")
+}
+
+func headerToken(hd http.Header, name, token string) bool {
+	for _, v := range hd.Values(name) {
+		for _, t := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(t), token) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// loginGuards: Listen mit Login-Seite unter den Routen eines Hosts (Host und Locations).
+func (m *Module) loginGuards(routes []route) []*guard {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []*guard
+	for _, rt := range routes {
+		if g := m.acl[rt.acl]; g != nil && g.hasLogin() && !slices.Contains(out, g) {
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
+// aclPersonal: die Liste reicht Anmeldung oder Benutzer an das Ziel (Antwort kann je Benutzer verschieden sein).
+func (m *Module) aclPersonal(acl int64) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	g := m.acl[acl]
+	return g == nil || g.list.PassAuth || g.list.PassUser || g.fwd != nil
+}
+
+// loginRoute: /.node64/ gehoert PROXY64, sobald eine Liste des Hosts (auch die einer Location) die Login-Seite hat;
+// das Formular nennt seine Liste. /.node64/login geht nie an das Ziel. false = normal weiter.
+func (m *Module) loginRoute(w http.ResponseWriter, r *http.Request, h *Host, routes []route, p string) bool {
+	gs := m.loginGuards(routes)
+	if len(gs) == 0 {
+		if p == loginPath {
+			page(w, http.StatusNotFound)
+			return true
+		}
+		return false
+	}
+	g := gs[0]
+	if p == loginPath && r.Method == http.MethodPost && len(gs) > 1 {
+		r.Body = http.MaxBytesReader(w, r.Body, 8<<10)
+		_ = r.ParseForm()
+		g = nil
+		for _, x := range gs {
+			if strconv.FormatInt(x.list.ID, 10) == r.PostFormValue("list") {
+				g = x
+			}
+		}
+		if g == nil {
+			page(w, http.StatusBadRequest)
+			return true
+		}
+	}
+	r.URL.Path, r.URL.RawPath = p, "" // geht nie ans Ziel
+	if m.allowed(w, r, h, g.list.ID) {
+		page(w, http.StatusNotFound)
+	}
+	return true
+}
+
+// allowed prueft die Zugriffsliste; false = Antwort ist schon geschrieben (401/403/429).
+func (m *Module) allowed(w http.ResponseWriter, r *http.Request, h *Host, acl int64) bool {
+	return m.allowedOr(w, r, h, acl, "")
+}
+
+// allowedOr wie allowed; deny: statt der 403-Seite dorthin weiterleiten (#55). Nur bei echter Ablehnung - verlangt die
+// Liste eine Anmeldung (401, Login-Seite, Anmeldedienst), bleibt es dabei, sonst koennte sich niemand mehr anmelden.
+func (m *Module) allowedOr(w http.ResponseWriter, r *http.Request, h *Host, acl int64, deny string) bool {
+	if acl <= 0 {
+		return true
+	}
+	m.mu.Lock()
+	g := m.acl[acl]
+	m.mu.Unlock()
+	if g == nil { // Liste geloescht: lieber sperren als offen lassen
+		if deny != "" {
+			deniedRedirect(w, r, deny)
+			return false
+		}
+		page(w, http.StatusForbidden)
+		return false
+	}
+	for _, n := range identityHeaders { // setzt nur PROXY64 (Benutzer an das Ziel melden), nie der Besucher
+		r.Header.Del(n)
+	}
+	if g.fwd != nil {
+		for _, n := range g.fwd.cfg.Headers {
+			r.Header.Del(n)
+		}
+	}
+	ip := clientOf(r)
+	if m.authFail.blocked(ip) {
+		setReject(r, rejACL)
+		w.Header().Set("Retry-After", strconv.Itoa(int(authBlockFor.Seconds())))
+		page(w, http.StatusTooManyRequests)
+		return false
+	}
+	if g.fwd != nil && g.fwd.isCallback(r.URL.Path) { // Rueckweg nach der Anmeldung gehoert dem Dienst (IP-Regeln gelten)
+		if len(g.list.Rules) > 0 && !g.list.SatisfyAny && !g.list.ipAllowedDyn(ip, g.dyn) {
+			setReject(r, rejACL)
+			page(w, http.StatusForbidden)
+			return false
+		}
+		g.fwd.callback.ServeHTTP(w, r)
+		return false
+	}
+	login := g.hasLogin()
+	if login && r.TLS == nil && h.HTTPS() { // Login nie im Klartext: auf HTTPS (nur echtes Port-80-HTTP; CDN64 Modus 2 hat r.TLS)
+		u := "https://" + urlHost(r.Host) + r.URL.RequestURI()
+		http.Redirect(w, r, u, http.StatusPermanentRedirect)
+		return false
+	}
+	if login && strings.HasPrefix(r.URL.Path, "/.node64/") { // Login-Seite: Anmelden und Abmelden gehoeren PROXY64
+		setReject(r, rejACL)
+		m.loginEndpoint(w, r, h, g, ip)
+		return false
+	}
+	var key []byte
+	if login {
+		key = m.loginKeyOf(r.Context())
+	}
+	v := g.decide(r, ip, key)
+	id := identity{user: v.user}
+	if v.fwd { // Anmeldedienst fragen; ohne Anmeldung hat er schon geantwortet (meist Weiterleitung zur Anmeldung)
+		res := g.fwd.check(w, r)
+		if res.err != nil {
+			if m.lim.warn("fwd|" + g.fwd.cfg.Address) {
+				m.log.Warn("access list: auth service not reachable", "list", g.list.Name, "address", g.fwd.cfg.Address, "err", res.err)
+			}
+			setReject(r, rejACL)
+			page(w, http.StatusBadGateway)
+			return false
+		}
+		if !res.ok {
+			setReject(r, rejACL)
+			return false
+		}
+		for _, n := range g.fwd.cfg.Headers {
+			if val := res.header.Values(n); len(val) > 0 {
+				r.Header[http.CanonicalHeaderKey(n)] = val
+			}
+		}
+		id, v.ok = identityOf(res.header), true
+	}
+	if v.ok {
+		if v.key {
+			stripKey(r)
+		}
+		if len(g.list.Users) > 0 && !g.list.PassAuth {
+			r.Header.Del("Authorization")
+		}
+		if login {
+			stripLoginCookie(r, g.list.ID)
+		}
+		if g.list.PassUser {
+			id.set(r.Header)
+		}
+		return true
+	}
+	status, failed := v.status, v.failed
+	if failed {
+		setAuthFail(r)
+	}
+	if failed && m.authFail.failed(ip) {
+		m.log.Warn("access list: too many failed logins, ip blocked", "host", h.Names[0], "ip", ip, "minutes", int(authBlockFor.Minutes()))
+		if m.g.Audit != nil {
+			m.g.Audit(r, "cdn64.access.blocked", h.Names[0], "ip="+ip.String())
+		}
+	}
+	if status != http.StatusUnauthorized { // 401 ist die normale Passwortabfrage
+		setReject(r, rejACL)
+	}
+	if status == http.StatusUnauthorized && login { // Formular statt Browser-Dialog
+		loginPage(w, r, g, safeNext(r.URL.RequestURI()), "", false)
+		return false
+	}
+	if status == http.StatusForbidden && deny != "" {
+		deniedRedirect(w, r, deny)
+		return false
+	}
+	if status == http.StatusUnauthorized {
+		w.Header().Set("WWW-Authenticate", `Basic realm="`+strings.ReplaceAll(g.list.Name, `"`, "")+`", charset="UTF-8"`)
+	}
+	page(w, status)
+	return false
+}
+
+// rejACLRedirect: von der Zugriffsliste abgewiesen und weitergeleitet (#55).
+const rejACLRedirect = "acl_redirect"
+
+// deniedRedirect: abgewiesene Anfrage mit 302 weiterleiten (#55); nie zwischenspeichern, die Antwort haengt von der
+// Adresse des Besuchers ab.
+func deniedRedirect(w http.ResponseWriter, r *http.Request, to string) {
+	setReject(r, rejACLRedirect)
+	w.Header().Set("Cache-Control", "no-store")
+	http.Redirect(w, r, to, http.StatusFound)
+}
+
+// ctxClient: echte Client-IP (nach den vertrauenswuerdigen Proxys des Hosts), im Kontext der Anfrage.
+type ctxClientKey struct{}
+
+// ctxRejectKey: Grund, falls die Anfrage abgewiesen wird (fuer Statistik und Log).
+type ctxRejectKey struct{}
+
+func setReject(r *http.Request, reason string) {
+	if p, ok := r.Context().Value(ctxRejectKey{}).(*string); ok {
+		*p = reason
+	}
+}
+
+func clientOf(r *http.Request) netip.Addr {
+	if ip, ok := r.Context().Value(ctxClientKey{}).(netip.Addr); ok {
+		return ip
+	}
+	return peerIP(r)
+}
+
+// handlerFor: was ein Host tut, mit Zaehlern, Statistik, Schleifenschutz, Exploit-Sperre, Upload-Grenze und HSTS.
+func (m *Module) handlerFor(h *Host, st *hostStats) http.Handler {
+	h.Advanced.prepare()
+	next := m.inner(h, st)
+	token := m.loopToken
+	hsts := ""
+	if h.HSTS {
+		hsts = "max-age=63072000"
+		if h.HSTSSubdomains {
+			hsts += "; includeSubDomains"
+		}
+	}
+	var bw *bwPair // Bandbreite des Hosts (nur Proxy-Hosts), geteilt von allen Anfragen
+	if h.Kind == KindProxy {
+		bw = m.bw.of(h.ID, h.Advanced.BWDownMbit, h.Advanced.BWUpMbit)
+	}
+	limited := !h.Advanced.NoLimits
+	maint := h.Kind == KindProxy && h.Advanced.Maintenance
+	// Upload-Grenze: ohne eigene Grenze einer Location gilt immer die des Hosts (keine Suche je Anfrage)
+	hostBody := int64(h.Advanced.MaxBodyMB) << 20
+	locBody := slices.ContainsFunc(h.Locations, func(l Location) bool { return l.Advanced != nil && l.Advanced.MaxBodyMB != 0 })
+	// volle Zielplaetze: eigene Fehlerseite nur ohne Zugriffsliste (die Pruefung liegt vor der Liste; eigenes HTML
+	// soll nicht ohne Anmeldung abrufbar sein, wie bei der Wartungsseite #33)
+	busyAdv := &h.Advanced
+	if h.AccessListID > 0 || slices.ContainsFunc(h.Locations, func(l Location) bool { return l.AccessListID > 0 }) {
+		busyAdv = nil
+	}
+	var sl, slg slots // gleichzeitige Anfragen an das Ziel; gRPC-Streams in eigenen, groesseren Plaetzen
+	if c := m.lim.config(); h.Kind == KindProxy && limited && c.Enabled && c.TargetConns > 0 {
+		sl, slg = make(slots, c.TargetConns), make(slots, c.TargetConns*grpcSlotFactor)
+	}
+	if h.Kind == KindProxy && !h.WebSockets && len(h.Locations) == 0 {
+		next = stripUpgrade(next)
+	}
+	if h.Kind != KindProxy && h.AccessListID > 0 { // Weiterleitung mit Zugriffsliste
+		inner, acl := next, h.AccessListID
+		next = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if m.allowed(w, r, h, acl) {
+				inner.ServeHTTP(w, r)
+			}
+		})
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		st.requests.Add(1)
+		client := h.Advanced.clientIP(r)
+		if localnet.MaskedGateway(client) { // Hinweis auf der Seite Proxy-Hosts
+			m.gwSeen.Store(time.Now().UnixNano())
+		}
+		reject, authFail, decoyed := new(string), new(bool), new(bool)
+		ctx := context.WithValue(context.WithValue(r.Context(), ctxClientKey{}, client), ctxRejectKey{}, reject)
+		r = r.WithContext(context.WithValue(context.WithValue(ctx, ctxAuthFailKey{}, authFail), ctxDecoyKey{}, decoyed))
+		sw := &statusWriter{ResponseWriter: w, bw: bw, ctx: r.Context()}
+		// Kopfzeilen des Hosts (Erweitert, HSTS) auf jede Antwort, auch auf die der Node selbst (Sperre, Anmeldung,
+		// Wartung, Fehlerseite, Weiterleitung). Antworten des Ziels haben die aus Erweitert schon (ModifyResponse, mit
+		// denen der Location); HSTS ersetzt einen eigenen Kopf des Ziels statt ihn zu verdoppeln.
+		fromTarget := new(bool)
+		if len(h.Advanced.ResponseHeaders) > 0 || hsts != "" { // sonst gibt es nichts zu setzen
+			r = r.WithContext(context.WithValue(r.Context(), ctxTargetKey{}, fromTarget))
+			sw.sec = func(hd http.Header) {
+				if !*fromTarget {
+					// eigene Antworten (Anmeldung, Sperre, Wartung, Fehlerseite): Kopfzeilen des Hosts nur ergaenzen - was die
+					// Node selbst setzt (no-store, X-Frame-Options DENY, WWW-Authenticate, Set-Cookie), bleibt; "entfernen"
+					// gilt nur fuer Antworten des Ziels
+					for _, x := range h.Advanced.ResponseHeaders {
+						if _, own := hd[http.CanonicalHeaderKey(x.Name)]; !own {
+							hd.Set(x.Name, x.Value)
+						}
+					}
+				}
+				if hsts != "" && r.TLS != nil {
+					hd.Set("Strict-Transport-Security", hsts)
+				}
+			}
+		}
+		defer func() {
+			m.hpReport(r, client, true, sw.code(), *authFail)
+			if sdb := m.stats2.Load(); sdb != nil {
+				dbg := m.debug()
+				sdb.add(hit{time: start, hostID: h.ID, client: client, method: r.Method, host: hostOnly(r.Host), path: trunc(r.URL.RequestURI(), 500),
+					status: sw.code(), bytes: sw.bytes + sw.hjOut.Load(), in: sw.in.Load(), ms: time.Since(start).Milliseconds(), ua: trunc(r.UserAgent(), 200), ref: trunc(r.Referer(), 500), proto: r.Proto, log: h.Advanced.AccessLog || dbg,
+					reason: *reject, decoy: *decoyed, all: dbg})
+			}
+		}()
+		if m.bl.Denied(client) { // eigene Sperrliste (echte Client-IP hinter vertrauenswuerdigen Proxys)
+			*reject = rejDeny
+			st.blocked.Add(1)
+			page(sw, http.StatusForbidden)
+			return
+		}
+		if m.bl.Blocked(client) { // ipv64-Blocklisten (echte Client-IP hinter vertrauenswuerdigen Proxys)
+			*reject = rejBlocklist
+			st.blocked.Add(1)
+			if !m.hpDivert(sw, r, client, rejBlocklist) {
+				page(sw, http.StatusForbidden)
+			}
+			return
+		}
+		if m.hpBlocked(client) { // vom Honeypot gemeldet (Sofort-Sperre)
+			*reject = rejHoneypot
+			st.blocked.Add(1)
+			if !m.hpDivert(sw, r, client, rejHoneypot) {
+				page(sw, http.StatusForbidden)
+			}
+			return
+		}
+		if m.geoBlocked(&h.Advanced, client) { // Laendersperre des Hosts
+			*reject = rejGeo
+			st.blocked.Add(1)
+			if !m.hpDivert(sw, r, client, rejGeo) {
+				page(sw, http.StatusForbidden)
+			}
+			return
+		}
+		if m.aiBlocked(&h.Advanced, r) { // KI-Bot nach User-Agent (aibots.go)
+			*reject = rejAIBot
+			st.blocked.Add(1)
+			if !m.hpDivert(sw, r, client, rejAIBot) {
+				page(sw, http.StatusForbidden)
+			}
+			return
+		}
+		if m.lim.banned(client) { // gesperrt wegen Ueberlastung
+			*reject = rejBan
+			st.blocked.Add(1)
+			page(sw, http.StatusForbidden)
+			return
+		}
+		if limited && !m.lim.request(client) { // zu viele Anfragen von dieser Adresse
+			*reject = rejReqRate
+			st.blocked.Add(1)
+			sw.Header().Set("Retry-After", "10")
+			page(sw, http.StatusTooManyRequests)
+			return
+		}
+		if r.Header.Get(loopHeader) == token { // Ziel zeigt auf diesen Proxy selbst
+			st.errors.Add(1)
+			page(sw, http.StatusLoopDetected)
+			return
+		}
+		if h.BlockExploits && !m.bl.exempt(client) { // Freigabeliste geht vor (auch eigene Netze, Forum 5048)
+			if rule := exploitHit(r); rule != "" {
+				m.log.Debug("exploit blocked", "host", hostOnly(r.Host), "rule", rule, "path", trunc(r.URL.Path, 200), "client", client.String())
+				*reject = rejExploit
+				st.blocked.Add(1)
+				if !m.hpDivert(sw, r, client, rejExploit) {
+					page(sw, http.StatusForbidden)
+				}
+				return
+			}
+		}
+		maxBody := hostBody
+		if locBody {
+			maxBody = maxBodyAt(h, r.URL.Path) // Location vor Host (Forum 4974)
+		}
+		if maxBody > 0 {
+			if r.ContentLength > maxBody {
+				page(sw, http.StatusRequestEntityTooLarge)
+				return
+			}
+			r.Body = http.MaxBytesReader(sw, r.Body, maxBody)
+		}
+		// WebSockets (nur, wo erlaubt) laufen lange und zaehlen nicht; gRPC-Streams (NetBird: je Peer zwei dauerhaft)
+		// zaehlen in eigenen, groesseren Plaetzen (der Kopf kommt vom Besucher - ohne Grenze hebelte er den Schutz aus);
+		// Wartung braucht kein Ziel
+		if sl != nil && !maint && !(wsUpgrade(r) && wsAt(h, r.URL.Path)) {
+			use := sl
+			if grpcReq(r) {
+				use = slg
+			}
+			if !use.acquire(r.Context(), limQueueWait) {
+				if r.Context().Err() == nil {
+					*reject = rejTarget
+					m.overload("target", h.Names[0])
+					m.lim.rejected.Add(1)
+					st.blocked.Add(1)
+					sw.Header().Set("Retry-After", "10")
+					hostPage(sw, r, busyAdv, http.StatusServiceUnavailable)
+				}
+				return
+			}
+			defer use.release()
+		}
+		if r.Body != nil && r.Body != http.NoBody { // Upload zaehlen (was das Ziel wirklich liest), mit Bandbreite des Hosts
+			if bw != nil {
+				r.Body = &bwBody{ReadCloser: r.Body, ctx: r.Context(), l: bw.up, n: &sw.in}
+			} else {
+				r.Body = &countBody{ReadCloser: r.Body, n: &sw.in}
+			}
+		}
+		// Ziel antwortet vor dem Ende des Uploads: Antwort zurueckhalten, Rest lesen und verwerfen (edge.KeepUpload)
+		var out http.ResponseWriter = sw
+		done := func() {}
+		if !wsUpgrade(r) && !grpcReq(r) {
+			out, done = edge.KeepUpload(sw, r)
+		}
+		next.ServeHTTP(out, r)
+		done()
+		if sw.status >= 500 && sw.status != http.StatusBadGateway { // 502 zaehlt der ErrorHandler schon
+			st.errors.Add(1)
+		}
+	})
+}
+
+func stripUpgrade(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Upgrade") != "" {
+			r.Header.Del("Upgrade")
+			r.Header.Del("Connection")
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func hostOnly(h string) string {
+	if x, _, err := net.SplitHostPort(h); err == nil {
+		return x
+	}
+	return h
+}
+
+// urlHost: Host-Kopf ohne Port fuer eine URL; ein IPv6-Literal steht immer genau einmal in Klammern.
+func urlHost(h string) string {
+	h = strings.Trim(hostOnly(h), "[]")
+	if strings.Contains(h, ":") {
+		return "[" + h + "]"
+	}
+	return h
+}
+
+func trunc(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+	bytes  int64        // Antwort an den Besucher
+	in     atomic.Int64 // Upload: Request-Body bzw. uebernommene Verbindung vom Besucher
+	hjOut  atomic.Int64 // uebernommene Verbindung zum Besucher (WebSocket)
+
+	bw  *bwPair         // Bandbreite des Hosts (nil = unbegrenzt)
+	ctx context.Context // der Anfrage: Warten auf Bandbreite endet mit ihr
+
+	sec     func(http.Header) // Kopfzeilen des Hosts, einmal vor der ersten Antwort (nicht bei 1xx)
+	secDone bool
+}
+
+// secure: Kopfzeilen des Hosts setzen, bevor die (endgueltige) Antwort beginnt.
+func (w *statusWriter) secure(code int) {
+	if w.sec != nil && !w.secDone && code >= 200 {
+		w.secDone = true
+		w.sec(w.Header())
+	}
+}
+
+// ctxTargetKey: *bool, gesetzt, wenn die Antwort vom Ziel bzw. aus dessen Cache kommt (Kopfzeilen aus Erweitert sind
+// dann schon gesetzt, ggf. die der Location).
+type ctxTargetKey struct{}
+
+func markTarget(r *http.Request) {
+	if r == nil {
+		return
+	}
+	if p, _ := r.Context().Value(ctxTargetKey{}).(*bool); p != nil {
+		*p = true
+	}
+}
+
+// code: Status der Antwort (0 = abgebrochen; ein uebernommener WebSocket hat 101).
+func (w *statusWriter) code() int {
+	if w.status == 0 {
+		return 499
+	}
+	return w.status
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	if code >= 100 && code < 200 && code != http.StatusSwitchingProtocols { // 100 Continue, 103 Early Hints: nicht der Status
+		w.ResponseWriter.WriteHeader(code)
+		return
+	}
+	if w.status == 0 {
+		w.status = code
+	}
+	w.secure(code)
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusWriter) Write(b []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	w.secure(http.StatusOK) // ohne WriteHeader (bzw. nach 1xx): implizit 200
+	var n int
+	var err error
+	if w.bw != nil {
+		n, err = bwWrite(w.ctx, w.bw.down, w.ResponseWriter, b)
+	} else {
+		n, err = w.ResponseWriter.Write(b)
+	}
+	w.bytes += int64(n)
+	return n, err
+}
+
+func (w *statusWriter) Flush() {
+	w.secure(http.StatusOK) // Flush vor WriteHeader sendet 200
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap: fuer http.ResponseController.
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// Hijack: WebSocket uebernehmen; was danach in beide Richtungen fliesst, zaehlt als Upload bzw. Download weiter.
+func (w *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	c, brw, err := http.NewResponseController(w.ResponseWriter).Hijack()
+	if err != nil {
+		return nil, nil, err
+	}
+	if w.status == 0 {
+		w.status = http.StatusSwitchingProtocols // sonst zaehlte der WebSocket als abgebrochen (499)
+	}
+	var cc net.Conn = &countConn{Conn: c, in: &w.in, out: &w.hjOut}
+	if w.bw != nil {
+		cc = &bwConn{Conn: cc, bw: w.bw}
+	}
+	return cc, brw, nil
+}
+
+// countBody zaehlt den gelesenen Request-Body (Upload).
+type countBody struct {
+	io.ReadCloser
+	n *atomic.Int64
+}
+
+func (b *countBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	b.n.Add(int64(n))
+	return n, err
+}
+
+// countConn zaehlt eine uebernommene Verbindung: gelesen = vom Besucher (Upload), geschrieben = zum Besucher.
+type countConn struct {
+	net.Conn
+	in, out *atomic.Int64
+}
+
+func (c *countConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	c.in.Add(int64(n))
+	return n, err
+}
+
+func (c *countConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	c.out.Add(int64(n))
+	return n, err
+}
+
+func peerIP(r *http.Request) netip.Addr {
+	ap, err := netip.ParseAddrPort(r.RemoteAddr)
+	if err != nil {
+		return netip.Addr{}
+	}
+	return ap.Addr().Unmap().WithZone("") // fe80::5%eth0: ohne Zone, sonst passt kein Netz
+}
+
+var pageText = map[int]string{
+	http.StatusBadGateway:   "The service behind this address is not reachable at the moment.",
+	http.StatusForbidden:    "This request was blocked.",
+	http.StatusLoopDetected: "This address points to itself.",
+}
+
+// page: neutrale Fehlerseite (verraet nichts ueber Node64 oder das Ziel).
+func page(w http.ResponseWriter, status int) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	_, _ = io.WriteString(w, "<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>"+strconv.Itoa(status)+" "+http.StatusText(status)+
+		"</title></head><body style=\"font-family:sans-serif;text-align:center;margin-top:15vh;color:#555\"><h1>"+strconv.Itoa(status)+
+		"</h1><p>"+pageText[status]+"</p></body></html>\n")
+}
+
+// ---------------------------------------------------------------- Routen beim Eingang
+
+// apply meldet alle eingeschalteten Hosts beim gemeinsamen Eingang an. Gehoert ein Name schon einem anderen
+// Teil (z. B. DNS64), bleibt nur dieser Host draussen und bekommt den Fehler angezeigt.
+func (m *Module) apply(ctx context.Context) {
+	m.applyMu.Lock()
+	defer m.applyMu.Unlock()
+	m.mu.Lock()
+	on := m.running
+	m.mu.Unlock()
+	if !on || m.edge == nil {
+		return
+	}
+	list, err := m.hosts(ctx)
+	if err != nil {
+		m.log.Error("hosts not readable", "err", err)
+		return
+	}
+	guards := m.guards(ctx)
+	m.limExempt(ctx, list)
+	m.bw.keep(list)
+	m.mu.Lock()
+	m.acl = guards
+	m.mu.Unlock()
+	errs := map[int64]string{}
+	var active []*Host
+	only := map[string]bool{}
+	for _, h := range list {
+		if h.Kind == KindStream { // nur Streams: keine Route, PROXY64 kennt den Namen auf 80/443 nicht
+			for _, n := range h.Names {
+				only[n] = true
+			}
+			continue
+		}
+		if h.Enabled {
+			active = append(active, h)
+		}
+	}
+	m.streamOnly.Store(&only)
+	m.geoNeed(active)
+	m.aiNeed(active)
+	for {
+		routes := make([]edge.Route, 0, len(active))
+		for _, h := range active {
+			routes = append(routes, m.routeFor(h))
+		}
+		err := m.edge.Set(Name, routes)
+		var taken *edge.NameTakenError
+		if err == nil || !errors.As(err, &taken) {
+			if err != nil {
+				m.log.Error("routes not applied", "err", err)
+			}
+			break
+		}
+		keep := active[:0]
+		for _, h := range active {
+			if contains(h.Names, taken.Name) {
+				errs[h.ID] = "name " + taken.Name + " is used by " + taken.Owner
+				continue
+			}
+			keep = append(keep, h)
+		}
+		active = keep
+	}
+	m.mu.Lock()
+	m.routeErr = errs
+	m.mu.Unlock()
+}
+
+func (m *Module) routeFor(h *Host) edge.Route {
+	handler := m.handlerFor(h, m.statsOf(h.ID))
+	if h.Kind == KindPass { // TLS durchreichen: auf Port 80 nur Weiterleitung auf HTTPS
+		st := m.statsOf(h.ID)
+		rt := edge.Route{Names: h.Names, Passthrough: net.JoinHostPort(h.TargetHost, strconv.Itoa(h.TargetPort)), Count: func() { st.requests.Add(1) },
+			HTTP: http.HandlerFunc(m.toHTTPS), ProxyProtocol: proxyVersion(h.Advanced.ProxyProtocol)}
+		if bw := m.bw.of(h.ID, h.Advanced.BWDownMbit, h.Advanced.BWUpMbit); bw != nil { // Bandbreite: roh, aber gebremst
+			rt.Wrap = func(c net.Conn) net.Conn { return &bwConn{Conn: c, bw: bw} }
+		}
+		// gesperrte IPs (der Eingang laesst sie mit Weg an den Koeder durch - TLS gehoert hier dem Ziel, also kein
+		// Koeder) und Laendersperre: Verbindung gleich nach dem ersten TLS-Paket schliessen
+		rt.Allow = func(ip netip.Addr) bool {
+			reason := ""
+			switch {
+			case m.bl.Denied(ip):
+				reason = rejDeny
+			case m.bl.Blocked(ip):
+				reason = rejBlocklist
+			case m.hpBlocked(ip):
+				reason = rejHoneypot
+			case h.Advanced.GeoMode != "" && m.geoBlocked(&h.Advanced, ip):
+				reason = rejGeo
+			}
+			if reason != "" {
+				st.blocked.Add(1)
+				m.rejectConn(ip, reason, h.Names[0])
+				return false
+			}
+			return true
+		}
+		return rt
+	}
+	rt := edge.Route{Names: h.Names, NoHTTP2: !h.HTTP2, HTTP3: h.HTTP3, MinTLS: tls.VersionTLS12}
+	rt.BSI = h.MinTLS == TLSBSI
+	if h.MinTLS == "1.3" {
+		rt.MinTLS = tls.VersionTLS13
+	}
+	if !h.HTTPS() {
+		rt.HTTP = handler
+		return rt
+	}
+	if h.CertID > 0 {
+		rt.CertID = h.CertID
+	}
+	rt.Handler = handler
+	if !h.ForceSSL {
+		rt.HTTP = handler
+	}
+	return rt
+}
+
+func contains(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
+// certUsers: welche Zertifikate die Hosts benutzen (Anzeige "benutzt von", Schutz beim Loeschen).
+func (m *Module) certUsers(ctx context.Context) map[int64][]string {
+	out := map[int64][]string{}
+	if m.certs == nil {
+		return out
+	}
+	list, err := m.hosts(ctx)
+	if err != nil {
+		return out
+	}
+	for _, h := range list {
+		if !h.Enabled || !h.HTTPS() {
+			continue
+		}
+		if h.CertID > 0 {
+			out[h.CertID] = append(out[h.CertID], h.Names[0])
+			continue
+		}
+		seen := map[int64]bool{}
+		for _, n := range h.Names {
+			if id := m.certs.MatchID(n); id > 0 && !seen[id] {
+				seen[id] = true
+				out[id] = append(out[id], h.Names[0])
+			}
+		}
+	}
+	return out
+}
+
+// hostOfName: fuer Anzeigen (Link auf den ersten Namen).
+func firstURL(h *Host) string {
+	if strings.HasPrefix(h.Names[0], "*.") || h.Kind == KindStream {
+		return ""
+	}
+	if h.HTTPS() {
+		return "https://" + h.Names[0]
+	}
+	return "http://" + h.Names[0]
+}
+
+// toHTTPS leitet auf HTTPS um (Port aus Sicht der Besucher).
+func (m *Module) toHTTPS(w http.ResponseWriter, r *http.Request) {
+	host := urlHost(r.Host)
+	if m.edge != nil {
+		if p := m.edge.Config().Public(); p != 443 {
+			host += ":" + strconv.Itoa(p)
+		}
+	}
+	http.Redirect(w, r, "https://"+host+r.URL.RequestURI(), http.StatusMovedPermanently)
+}

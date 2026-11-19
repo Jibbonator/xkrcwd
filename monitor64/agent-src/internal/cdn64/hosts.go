@@ -1,0 +1,732 @@
+package cdn64
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"net/netip"
+	"net/url"
+	"path"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+	"unicode"
+
+	"github.com/ipv64net/node64/internal/edge"
+	"github.com/ipv64net/node64/internal/ports"
+	"github.com/ipv64net/node64/internal/store"
+)
+
+// Zertifikat eines Hosts.
+const (
+	CertAuto = 0  // passendes Zertifikat nach Namen
+	CertNone = -1 // nur HTTP
+)
+
+const maxNames = 50
+
+// Arten von Hosts.
+const (
+	KindProxy    = "proxy"       // Reverse-Proxy auf ein Ziel
+	KindRedirect = "redirect"    // Weiterleitung auf eine andere Domain
+	KindDead     = "dead"        // antwortet immer mit 404
+	KindPass     = "passthrough" // TLS durchreichen (das Ziel beendet TLS selbst)
+	KindStatus   = "status"      // Statusseite der Healthchecks (StatusPageID)
+	KindStream   = "stream"      // nur Streams: CDN64-Name fuer den Portmapper, kein HTTP/HTTPS, kein Ziel
+)
+
+var redirectCodes = map[int]bool{300: true, 301: true, 302: true, 303: true, 307: true, 308: true}
+
+// TLSBSI: Host.MinTLS fuer TLS nach BSI TR-02102-2 (TLS 1.2 und 1.3, Verfahren nach der Richtlinie, edge.Route.BSI).
+const TLSBSI = "bsi"
+
+// Host ist ein Proxy-Host.
+type Host struct {
+	ID             int64      `json:"id"`
+	Kind           string     `json:"kind"`
+	Names          []string   `json:"names"`
+	Enabled        bool       `json:"enabled"`
+	Scheme         string     `json:"scheme"`      // Ziel http | https
+	TargetHost     string     `json:"target_host"` // Name oder IP
+	TargetPort     int        `json:"target_port"`
+	WebSockets     bool       `json:"websockets"`
+	BlockExploits  bool       `json:"block_exploits"`
+	CacheAssets    bool       `json:"cache_assets"`
+	CertID         int64      `json:"cert_id"` // 0 = passendes, -1 = nur HTTP
+	ForceSSL       bool       `json:"force_ssl"`
+	HTTP2          bool       `json:"http2"`
+	HTTP3          bool       `json:"http3"`
+	HSTS           bool       `json:"hsts"`
+	HSTSSubdomains bool       `json:"hsts_subdomains"`
+	MinTLS         string     `json:"min_tls"`                   // 1.2 | 1.3 | bsi (TLS nach BSI TR-02102-2)
+	VerifyTarget   bool       `json:"verify_target"`             // Zertifikat eines https-Ziels pruefen
+	RedirectTarget string     `json:"redirect_target,omitempty"` // Weiterleitung: Domain[:Port][/Pfad]
+	RedirectScheme string     `json:"redirect_scheme,omitempty"` // auto | http | https
+	RedirectCode   int        `json:"redirect_code,omitempty"`   // 301, 302, 307, 308 …
+	PreservePath   bool       `json:"preserve_path"`             // Pfad und Abfrage mitnehmen
+	AccessListID   int64      `json:"access_list_id"`            // Zugriffsliste (0 = keine)
+	Locations      []Location `json:"locations"`                 // Custom Locations (nur Proxy-Hosts)
+	Advanced       Advanced   `json:"advanced"`                  // weitere Optionen
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+
+	StatusPageID int64 `json:"status_page_id"` // Statusseite der Healthchecks (nur Hostart status)
+
+	// Von Docker verwaltet (docker.go): Namen, Schema und Ziel kommen aus den Labels des Containers, nur lesen.
+	DockerContainer string `json:"docker_container,omitempty"` // Container-Name ("" = von Hand angelegt)
+	DockerRouter    string `json:"docker_router,omitempty"`    // Traefik-Router ("" = node64.proxy.*)
+}
+
+// Target ist die Adresse des Ziels (scheme://host:port).
+func (h *Host) Target() string {
+	return h.Scheme + "://" + net.JoinHostPort(h.TargetHost, strconv.Itoa(h.TargetPort))
+}
+
+// HTTPS: der Host beendet HTTPS hier (beim Durchreichen macht das das Ziel).
+func (h *Host) HTTPS() bool { return h.CertID != CertNone && h.Kind != KindPass }
+
+// hasTarget: der Host hat ein Ziel (Proxy, TLS durchreichen) - fuer Healthchecks auf das Ziel.
+func (h *Host) hasTarget() bool { return h.Kind == KindProxy || h.Kind == KindPass }
+
+// probed: das Ziel wird auf Erreichbarkeit geprueft (abschaltbar je Host; Healthchecks aufs Ziel gehen trotzdem).
+func (h *Host) probed() bool { return h.hasTarget() && !h.Advanced.NoProbe }
+
+// newHost: Standardwerte eines neuen Hosts.
+func newHost() *Host { return newHostKind(KindProxy) }
+
+func newHostKind(kind string) *Host {
+	h := &Host{Kind: kind, Enabled: true, Scheme: "http", TargetPort: 80, WebSockets: true, HTTP2: true, HTTP3: true, MinTLS: "1.2",
+		RedirectScheme: "auto", RedirectCode: 301, PreservePath: true}
+	if kind == KindPass {
+		h.Scheme, h.TargetPort, h.CertID = "https", 443, CertNone
+	}
+	if kind == KindStream {
+		h.TargetPort, h.CertID, h.WebSockets, h.HTTP2, h.HTTP3 = 0, CertNone, false, false, false
+	}
+	h.Advanced.Gzip = kind == KindProxy // Komprimierung fuer neue Proxy-Hosts an
+	return h
+}
+
+func validKind(k string) bool {
+	return k == KindProxy || k == KindRedirect || k == KindDead || k == KindPass || k == KindStatus || k == KindStream
+}
+
+// FieldError ist ein Fehler in einem Feld (Formular, API 422); Key ist der Text, Name ein Wert dazu.
+type FieldError struct{ Field, Key, Name string }
+
+func (e *FieldError) Error() string { return e.Field + ": " + e.Key }
+
+func ferr(field, key string) error { return &FieldError{Field: field, Key: key} }
+
+var errNotFound = errors.New("host not found")
+
+// ParseNames teilt eine Eingabe (Komma, Leerzeichen, Zeilen) in Namen.
+func ParseNames(s string) []string {
+	return strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' || r == '\n' || r == '\r' || r == '\t' || r == ';' })
+}
+
+// normalize prueft einen Host und bringt ihn in die Grundform.
+func (h *Host) normalize() error {
+	seen := map[string]bool{}
+	var names []string
+	for _, n := range h.Names {
+		if strings.TrimSpace(n) == "" {
+			continue
+		}
+		nn, err := edge.NormalizeName(n)
+		if err != nil {
+			return ferr("names", "cdn64.err.name")
+		}
+		if !seen[nn] {
+			seen[nn] = true
+			names = append(names, nn)
+		}
+	}
+	if len(names) == 0 {
+		return ferr("names", "cdn64.err.names_required")
+	}
+	if len(names) > maxNames {
+		return ferr("names", "cdn64.err.names_many")
+	}
+	h.Names = names
+	if h.Kind == "" {
+		h.Kind = KindProxy
+	}
+	if !validKind(h.Kind) {
+		return ferr("kind", "cdn64.err.kind")
+	}
+	if err := h.Advanced.normalize(); err != nil {
+		return err
+	}
+	if h.Kind == KindDead || h.Kind == KindStream { // 404-Host bzw. nur Streams: nichts zu schuetzen (Streams haben eigene Sperren)
+		h.Advanced.GeoMode = ""
+	}
+	h.Advanced.normalizeAI(h.Kind)
+	if err := h.Advanced.normalizeGeo(); err != nil {
+		return err
+	}
+	if err := h.Advanced.normalizeMaint(h.Kind); err != nil {
+		return err
+	}
+	if err := h.Advanced.normalizeErrPage(h.Kind); err != nil {
+		return err
+	}
+	if h.Locations == nil {
+		h.Locations = []Location{}
+	}
+	if h.Kind != KindProxy {
+		h.Locations = []Location{}
+		h.Advanced.TargetPath, h.Advanced.OnlyLocations = "", false // Pfad beim Ziel und "nur Locations" nur bei Proxy-Hosts
+		h.Advanced.TargetHTTP = ""                                  // ebenso das Protokoll zum Ziel
+		h.Advanced.NextcloudDAV = false                             // und die Nextcloud-Weiterleitungen
+	}
+	if h.Kind != KindPass {
+		h.Advanced.ProxyProtocol = "" // PROXY-Kopf zum Ziel nur beim Durchreichen (sonst setzt der Proxy X-Forwarded-For)
+	}
+	if err := normalizeLocations(h.Locations); err != nil {
+		return err
+	}
+	for i := range h.Locations { // Weiterleitung bei verweigertem Zugriff darf nicht im Kreis laufen (#55)
+		if l := &h.Locations[i]; deniedLoop(h.Names, h.Locations, l) {
+			return &FieldError{Field: "locations", Key: "cdn64.err.location_denied_loop", Name: l.Path}
+		}
+	}
+	if h.Advanced.OnlyLocations && len(h.Locations) == 0 {
+		return ferr("locations", "cdn64.err.only_locations")
+	}
+	if h.AccessListID < 0 {
+		h.AccessListID = 0
+	}
+	if h.Kind == KindPass || h.Kind == KindDead || h.Kind == KindStream {
+		h.AccessListID = 0
+	}
+	if h.MinTLS != "1.3" && h.MinTLS != TLSBSI {
+		h.MinTLS = "1.2"
+	}
+	if h.Kind != KindStatus {
+		h.StatusPageID = 0
+	}
+	switch h.Kind {
+	case KindRedirect:
+		if err := h.normalizeRedirect(); err != nil {
+			return err
+		}
+		h.TargetHost, h.TargetPort, h.WebSockets, h.CacheAssets = "", 0, false, false
+		return h.normalizeTLS()
+	case KindDead:
+		h.TargetHost, h.TargetPort, h.WebSockets, h.CacheAssets, h.BlockExploits = "", 0, false, false, false
+		return h.normalizeTLS()
+	case KindStream: // nur der Name fuer Streams (CDN64-Portmapper): PROXY64 beantwortet ihn weder auf 80 noch auf 443
+		h.TargetHost, h.TargetPort, h.WebSockets, h.CacheAssets, h.BlockExploits = "", 0, false, false, false
+		h.Scheme, h.CertID, h.HTTP2, h.HTTP3, h.RedirectTarget = "http", CertNone, false, false, ""
+		h.Advanced = Advanced{}
+		for _, n := range h.Names {
+			if strings.HasPrefix(n, "*.") {
+				return ferr("names", "cdn64.err.stream_wildcard")
+			}
+		}
+		return h.normalizeTLS()
+	case KindStatus: // Seite kommt aus den Healthchecks: kein Ziel, keine Weiterleitung
+		if h.StatusPageID <= 0 {
+			return ferr("status_page_id", "cdn64.err.status_page")
+		}
+		h.TargetHost, h.TargetPort, h.WebSockets, h.CacheAssets, h.RedirectTarget = "", 0, false, false, ""
+		return h.normalizeTLS()
+	case KindPass:
+		h.Scheme, h.CertID, h.WebSockets, h.CacheAssets, h.BlockExploits = "https", CertNone, false, false, false
+		h.ForceSSL, h.HSTS, h.HSTSSubdomains, h.HTTP3 = false, false, false, false
+		for _, n := range h.Names {
+			if strings.HasPrefix(n, "*.") {
+				return ferr("names", "cdn64.err.pass_wildcard")
+			}
+		}
+	}
+	if h.Scheme != "http" && h.Scheme != "https" {
+		return ferr("scheme", "cdn64.err.scheme")
+	}
+	t := strings.TrimSpace(h.TargetHost)
+	t = strings.TrimSuffix(strings.TrimPrefix(t, "["), "]")
+	if a, err := netip.ParseAddr(t); err == nil {
+		t = a.String()
+	} else if nn, err := edge.NormalizeName(t); err == nil && !strings.HasPrefix(nn, "*") {
+		t = nn
+	} else if !isSingleLabel(t) {
+		return ferr("target_host", "cdn64.err.target_host")
+	}
+	h.TargetHost = strings.ToLower(t)
+	if h.TargetPort < 1 || h.TargetPort > 65535 {
+		return ferr("target_port", "cdn64.err.port")
+	}
+	return h.normalizeTLS()
+}
+
+// normalizeTLS: Zertifikat und HTTPS-Optionen.
+func (h *Host) normalizeTLS() error {
+	if h.CertID < CertNone {
+		return ferr("cert_id", "cdn64.err.cert")
+	}
+	if !h.HTTPS() { // ohne HTTPS gibt es keine HTTPS-Optionen
+		h.ForceSSL, h.HSTS, h.HSTSSubdomains = false, false, false
+	}
+	if !h.HSTS {
+		h.HSTSSubdomains = false
+	}
+	return nil
+}
+
+// normalizeRedirect prueft Ziel, Schema und Code einer Weiterleitung.
+func (h *Host) normalizeRedirect() error {
+	t := strings.TrimSpace(h.RedirectTarget)
+	for _, p := range []string{"https://", "http://"} {
+		t = strings.TrimPrefix(t, p)
+	}
+	u, err := url.Parse("http://" + t)
+	if err != nil || u.Host == "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+		return ferr("redirect_target", "cdn64.err.redirect_target")
+	}
+	host := u.Hostname()
+	if a, err := netip.ParseAddr(host); err == nil {
+		host = a.String()
+	} else if nn, err := edge.NormalizeName(host); err != nil || strings.HasPrefix(nn, "*") {
+		return ferr("redirect_target", "cdn64.err.redirect_target")
+	} else {
+		host = nn
+	}
+	hp := host
+	if strings.Contains(host, ":") {
+		hp = "[" + host + "]"
+	}
+	if p := u.Port(); p != "" {
+		if n, err := strconv.Atoi(p); err != nil || n < 1 || n > 65535 {
+			return ferr("redirect_target", "cdn64.err.redirect_target")
+		}
+		hp += ":" + p
+	}
+	h.RedirectTarget = hp + strings.TrimSuffix(u.EscapedPath(), "/")
+	if h.RedirectScheme != "http" && h.RedirectScheme != "https" {
+		h.RedirectScheme = "auto"
+	}
+	if h.RedirectCode == 0 {
+		h.RedirectCode = 301
+	}
+	if !redirectCodes[h.RedirectCode] {
+		return ferr("redirect_code", "cdn64.err.redirect_code")
+	}
+	for _, n := range h.Names { // Weiterleitung auf sich selbst
+		if hp == n {
+			return ferr("redirect_target", "cdn64.err.redirect_self")
+		}
+	}
+	return nil
+}
+
+// normalizeTarget prueft ein Ziel (Name, IP oder einfacher Rechnername) und bringt es in die Grundform.
+func normalizeTarget(t string) (string, bool) {
+	t = strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(t), "["), "]")
+	if a, err := netip.ParseAddr(t); err == nil {
+		return a.String(), true
+	}
+	if nn, err := edge.NormalizeName(t); err == nil && !strings.HasPrefix(nn, "*") {
+		return nn, true
+	}
+	if isSingleLabel(t) {
+		return strings.ToLower(t), true
+	}
+	return "", false
+}
+
+// normalizeLocations prueft die Custom Locations (Pfad eindeutig, Ziel gueltig).
+func normalizeLocations(list []Location) error {
+	seen := map[string]bool{}
+	for i := range list {
+		l := &list[i]
+		l.Path = "/" + strings.Trim(strings.TrimSpace(l.Path), "/")
+		if l.Path == "/" || strings.ContainsAny(l.Path, " ?#\\") || len(l.Path) > 200 {
+			return &FieldError{Field: "locations", Key: "cdn64.err.location_path", Name: l.Path}
+		}
+		if seen[pathKey(l.Path)] { // /API und /api sind dieselbe Location (pathIn)
+			return &FieldError{Field: "locations", Key: "cdn64.err.location_dup", Name: l.Path}
+		}
+		seen[pathKey(l.Path)] = true
+		if l.AccessListID < 0 { // vor dem continue: auch sperren/feste Antwort (proxy.go: <= 0 = wie der Host)
+			l.AccessListID = 0
+		}
+		to, ok := cleanDeniedRedirect(l.DeniedRedirect) // gilt fuer jede Aktion (die Zugriffsliste prueft vorher)
+		if !ok {
+			return &FieldError{Field: "locations", Key: "cdn64.err.location_denied", Name: l.Path}
+		}
+		l.DeniedRedirect = to
+		if l.Action != LocProxy { // sperren bzw. feste Antwort: ohne Ziel
+			if err := l.normalizeAction(); err != nil {
+				return err
+			}
+			continue
+		}
+		l.Status, l.Body, l.ContentType = 0, "", ""
+		if l.Advanced.empty() {
+			l.Advanced = nil
+		} else if err := l.Advanced.normalize(l.Path); err != nil {
+			return err
+		}
+		if l.Scheme != "https" {
+			l.Scheme = "http"
+		}
+		t, ok := normalizeTarget(l.TargetHost)
+		if !ok || l.TargetPort < 1 || l.TargetPort > 65535 {
+			return &FieldError{Field: "locations", Key: "cdn64.err.location_target", Name: l.Path}
+		}
+		l.TargetHost = t
+		if fp := strings.TrimSpace(l.ForwardPath); fp != "" {
+			fp = "/" + strings.Trim(fp, "/")
+			if strings.ContainsAny(fp, " ?#") || len(fp) > 200 {
+				return &FieldError{Field: "locations", Key: "cdn64.err.location_path", Name: fp}
+			}
+			l.ForwardPath = fp
+		}
+	}
+	return nil
+}
+
+// cleanDeniedRedirect prueft das Ziel der Weiterleitung bei verweigertem Zugriff (#55): relativer Pfad (/..., nicht
+// //... - das waere ein fremder Host) oder http(s)-URL mit Host, ohne Benutzerangabe, Leer- und Steuerzeichen.
+func cleanDeniedRedirect(s string) (string, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", true
+	}
+	if len(s) > 500 || strings.ContainsFunc(s, func(c rune) bool { return c == '\\' || unicode.IsSpace(c) || unicode.IsControl(c) }) {
+		return "", false
+	}
+	u, err := url.Parse(s)
+	if err != nil {
+		return "", false
+	}
+	if strings.HasPrefix(s, "/") {
+		return s, !strings.HasPrefix(s, "//")
+	}
+	sc := strings.ToLower(u.Scheme)
+	return s, (sc == "http" || sc == "https") && u.Hostname() != "" && u.User == nil && u.Opaque == ""
+}
+
+// deniedLoop: das Ziel der Weiterleitung von l liegt auf diesem Host in einer Location, die selbst bei verweigertem
+// Zugriff weiterleitet (auch l selbst) - abgewiesene Besucher liefen im Kreis.
+func deniedLoop(names []string, list []Location, l *Location) bool {
+	if l.DeniedRedirect == "" {
+		return false
+	}
+	u, err := url.Parse(l.DeniedRedirect)
+	if err != nil {
+		return true
+	}
+	if u.Host != "" && !slices.ContainsFunc(names, func(n string) bool { return strings.EqualFold(n, u.Hostname()) }) {
+		return false // anderer Host
+	}
+	p, ok := reqPath(u.Path)
+	if !ok {
+		return true
+	}
+	best, at := -1, 0
+	for i := range list {
+		if pre := path.Clean(list[i].Path); len(pre) > best && pathIn(p, pre) {
+			best, at = len(pre), i
+		}
+	}
+	return best >= 0 && list[at].DeniedRedirect != ""
+}
+
+// normalizeAction prueft eine Location ohne Ziel (sperren, feste Antwort) und leert die Felder des Ziels.
+func (l *Location) normalizeAction() error {
+	switch l.Action {
+	case LocBlock:
+		if l.Status == 0 {
+			l.Status = http.StatusForbidden
+		}
+		if l.Status < 400 || l.Status > 499 {
+			return &FieldError{Field: "locations", Key: "cdn64.err.location_status", Name: l.Path}
+		}
+		l.Body, l.ContentType = "", ""
+	case LocRespond:
+		if l.Status == 0 {
+			l.Status = http.StatusOK
+		}
+		if l.Status < 200 || l.Status > 599 || l.Status == http.StatusNoContent && l.Body != "" {
+			return &FieldError{Field: "locations", Key: "cdn64.err.location_status", Name: l.Path}
+		}
+		l.Body = strings.ReplaceAll(l.Body, "\r\n", "\n")
+		l.ContentType = strings.TrimSpace(l.ContentType)
+		if len(l.Body) > maxLocBody || len(l.ContentType) > 100 || strings.ContainsAny(l.ContentType, "\r\n") {
+			return &FieldError{Field: "locations", Key: "cdn64.err.location_body", Name: l.Path}
+		}
+		if l.ContentType == "" {
+			l.ContentType = "text/plain; charset=utf-8"
+		}
+	default:
+		return &FieldError{Field: "locations", Key: "cdn64.err.location_action", Name: l.Path}
+	}
+	l.Scheme, l.TargetHost, l.TargetPort, l.ForwardPath, l.WebSockets, l.Advanced = "http", "", 0, "", false, nil
+	return nil
+}
+
+// isSingleLabel: einfacher Rechnername im LAN ("nas", "homeassistant").
+func isSingleLabel(s string) bool {
+	if s == "" || len(s) > 63 || s[0] == '-' || s[len(s)-1] == '-' {
+		return false
+	}
+	for _, c := range strings.ToLower(s) {
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// ---------------------------------------------------------------- Datenbank
+
+const hostCols = `id, kind, names, enabled, scheme, target_host, target_port, websockets, block_exploits, cache_assets, cert_id, force_ssl, http2,
+	http3, hsts, hsts_subdomains, min_tls, verify_target, redirect_target, redirect_scheme, redirect_code, preserve_path, access_list_id, locations,
+	advanced, created_at, updated_at, status_page_id, docker_container, docker_router`
+
+func scanHost(row interface{ Scan(...any) error }) (*Host, error) {
+	var h Host
+	var names, locs, adv, ca, ua string
+	if err := row.Scan(&h.ID, &h.Kind, &names, &h.Enabled, &h.Scheme, &h.TargetHost, &h.TargetPort, &h.WebSockets, &h.BlockExploits, &h.CacheAssets,
+		&h.CertID, &h.ForceSSL, &h.HTTP2, &h.HTTP3, &h.HSTS, &h.HSTSSubdomains, &h.MinTLS, &h.VerifyTarget, &h.RedirectTarget, &h.RedirectScheme,
+		&h.RedirectCode, &h.PreservePath, &h.AccessListID, &locs, &adv, &ca, &ua, &h.StatusPageID, &h.DockerContainer, &h.DockerRouter); err != nil {
+		return nil, err
+	}
+	_ = json.Unmarshal([]byte(locs), &h.Locations)
+	if h.Locations == nil {
+		h.Locations = []Location{}
+	}
+	_ = json.Unmarshal([]byte(adv), &h.Advanced)
+	h.Names = strings.Split(names, ",")
+	h.CreatedAt, h.UpdatedAt = store.ParseTime(ca), store.ParseTime(ua)
+	return &h, nil
+}
+
+func (m *Module) hosts(ctx context.Context) ([]*Host, error) {
+	rows, err := m.core.Reader().QueryContext(ctx, `SELECT `+hostCols+` FROM cdn_hosts ORDER BY names`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Host
+	for rows.Next() {
+		h, err := scanHost(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
+func (m *Module) host(ctx context.Context, id int64) (*Host, error) {
+	h, err := scanHost(m.core.Reader().QueryRowContext(ctx, `SELECT `+hostCols+` FROM cdn_hosts WHERE id = ?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, errNotFound
+	}
+	return h, err
+}
+
+// checkUnique: kein Name ist schon bei einem anderen Host.
+func (m *Module) checkUnique(ctx context.Context, h *Host) error {
+	list, err := m.hosts(ctx)
+	if err != nil {
+		return err
+	}
+	for _, o := range list {
+		if o.ID == h.ID {
+			continue
+		}
+		for _, n := range o.Names {
+			for _, w := range h.Names {
+				if n == w {
+					return &FieldError{Field: "names", Key: "cdn64.err.name_taken", Name: n}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// saveHost legt an (ID 0) oder aendert und baut die Routen neu.
+func (m *Module) saveHost(ctx context.Context, h *Host) error {
+	if err := h.normalize(); err != nil {
+		return err
+	}
+	if h.CertID > 0 && m.certs != nil {
+		if _, err := m.certs.Get(ctx, h.CertID); err != nil {
+			return ferr("cert_id", "cdn64.err.cert")
+		}
+	}
+	if err := m.checkUnique(ctx, h); err != nil {
+		return err
+	}
+	if h.Kind == KindPass && m.passToSelf(ctx, h) {
+		return ferr("target_port", "cdn64.err.pass_self")
+	}
+	for _, id := range append([]int64{h.AccessListID}, locationACLs(h)...) {
+		if id > 0 {
+			if _, err := m.accessList(ctx, id); err != nil {
+				return ferr("access_list_id", "cdn64.err.acl_unknown")
+			}
+		}
+	}
+	locs, _ := json.Marshal(h.Locations)
+	adv, _ := json.Marshal(h.Advanced)
+	now := store.Now()
+	w := m.core.Writer()
+	args := []any{h.Kind, strings.Join(h.Names, ","), h.Enabled, h.Scheme, h.TargetHost, h.TargetPort, h.WebSockets, h.BlockExploits, h.CacheAssets,
+		h.CertID, h.ForceSSL, h.HTTP2, h.HTTP3, h.HSTS, h.HSTSSubdomains, h.MinTLS, h.VerifyTarget, h.RedirectTarget, h.RedirectScheme, h.RedirectCode,
+		h.PreservePath, h.AccessListID, string(locs), string(adv), h.StatusPageID}
+	if h.ID == 0 {
+		res, err := w.ExecContext(ctx, `INSERT INTO cdn_hosts (kind, names, enabled, scheme, target_host, target_port, websockets, block_exploits, cache_assets,
+			cert_id, force_ssl, http2, http3, hsts, hsts_subdomains, min_tls, verify_target, redirect_target, redirect_scheme, redirect_code, preserve_path,
+			access_list_id, locations, advanced, status_page_id, created_at, updated_at, docker_container, docker_router)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, append(args, now, now, h.DockerContainer, h.DockerRouter)...)
+		if err != nil {
+			return err
+		}
+		h.ID, _ = res.LastInsertId()
+	} else {
+		res, err := w.ExecContext(ctx, `UPDATE cdn_hosts SET kind = ?, names = ?, enabled = ?, scheme = ?, target_host = ?, target_port = ?, websockets = ?,
+			block_exploits = ?, cache_assets = ?, cert_id = ?, force_ssl = ?, http2 = ?, http3 = ?, hsts = ?, hsts_subdomains = ?, min_tls = ?,
+			verify_target = ?, redirect_target = ?, redirect_scheme = ?, redirect_code = ?, preserve_path = ?, access_list_id = ?, locations = ?,
+			advanced = ?, status_page_id = ?, updated_at = ? WHERE id = ?`,
+			append(args, now, h.ID)...)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return errNotFound
+		}
+	}
+	m.cache.dropHost(h.ID)
+	m.apply(ctx)
+	m.checkSoon(h.ID)
+	m.onlineKick() // entfernte Namen auch bei CDN64 online ausschalten
+	return nil
+}
+
+// setHostDocker setzt die Docker-Kennung eines Hosts (Container "" = wieder von Hand); saveHost aendert sie nicht.
+func (m *Module) setHostDocker(ctx context.Context, id int64, container, router string) error {
+	res, err := m.core.Writer().ExecContext(ctx, `UPDATE cdn_hosts SET docker_container = ?, docker_router = ?, updated_at = ? WHERE id = ?`,
+		container, router, store.Now(), id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errNotFound
+	}
+	return nil
+}
+
+// dockerHostOf: der Docker-Host zu Container und Router (nil = keiner).
+func dockerHostOf(list []*Host, container, router string) *Host {
+	for _, h := range list {
+		if h.DockerContainer != "" && h.DockerContainer == container && h.DockerRouter == router {
+			return h
+		}
+	}
+	return nil
+}
+
+func (m *Module) setEnabled(ctx context.Context, id int64, on bool) error {
+	res, err := m.core.Writer().ExecContext(ctx, `UPDATE cdn_hosts SET enabled = ?, updated_at = ? WHERE id = ?`, on, store.Now(), id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errNotFound
+	}
+	m.apply(ctx)
+	if on {
+		m.checkSoon(id)
+	}
+	return nil
+}
+
+func (m *Module) deleteHost(ctx context.Context, id int64) error {
+	res, err := m.core.Writer().ExecContext(ctx, `DELETE FROM cdn_hosts WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errNotFound
+	}
+	m.cache.dropHost(id)
+	m.reach.forget(id)
+	m.apply(ctx)
+	m.onlineKick() // Namen bei CDN64 online ausschalten
+	return nil
+}
+
+func locationACLs(h *Host) []int64 {
+	var out []int64
+	for _, l := range h.Locations {
+		out = append(out, l.AccessListID)
+	}
+	return out
+}
+
+// summary: kurze Beschreibung fuer das Audit.
+func (h *Host) summary() string {
+	switch h.Kind {
+	case KindRedirect:
+		return fmt.Sprintf("kind=redirect to=%s://%s code=%d preserve_path=%v enabled=%v cert=%d force_ssl=%v", h.RedirectScheme, h.RedirectTarget,
+			h.RedirectCode, h.PreservePath, h.Enabled, h.CertID, h.ForceSSL)
+	case KindDead:
+		return fmt.Sprintf("kind=dead enabled=%v cert=%d force_ssl=%v", h.Enabled, h.CertID, h.ForceSSL)
+	case KindStatus:
+		return fmt.Sprintf("kind=status page=%d enabled=%v cert=%d force_ssl=%v acl=%d", h.StatusPageID, h.Enabled, h.CertID, h.ForceSSL, h.AccessListID)
+	case KindPass:
+		return fmt.Sprintf("kind=passthrough target=%s enabled=%v proxy_protocol=%s", net.JoinHostPort(h.TargetHost, strconv.Itoa(h.TargetPort)), h.Enabled,
+			h.Advanced.ProxyProtocol)
+	case KindStream:
+		return fmt.Sprintf("kind=stream enabled=%v", h.Enabled)
+	}
+	return fmt.Sprintf("target=%s enabled=%v ws=%v exploits=%v cache=%v cert=%d force_ssl=%v http2=%v http3=%v hsts=%v tls=%s acl=%d locations=%d", h.Target(),
+		h.Enabled, h.WebSockets, h.BlockExploits, h.CacheAssets, h.CertID, h.ForceSSL, h.HTTP2, h.HTTP3, h.HSTS, h.MinTLS, h.AccessListID, len(h.Locations))
+}
+
+// passToSelf: Durchreichen auf die eigene Oberflaeche (Port des Kerns "web" auf localhost bzw. einer Adresse dieser
+// Node) gaebe Fremden aus dem Internet eine Verbindung, die wie aus dem Heimnetz aussieht (ohne weitergereichte
+// Client-Adresse; /mcp und Heimnetz-Pruefungen sind dann blind). Die Oberflaeche geht ueber einen Proxy-Host.
+func (m *Module) passToSelf(ctx context.Context, h *Host) bool {
+	if m.ports == nil {
+		return false
+	}
+	web := false
+	for _, c := range m.ports.All(ctx) {
+		if c.Owner == "web" && c.Proto == ports.TCP && c.Port == h.TargetPort {
+			web = true
+		}
+	}
+	if !web {
+		return false
+	}
+	if h.TargetHost == "localhost" {
+		return true
+	}
+	a, err := netip.ParseAddr(h.TargetHost)
+	if err != nil {
+		return false
+	}
+	a = a.Unmap()
+	if a.IsLoopback() || a.IsUnspecified() {
+		return true
+	}
+	addrs, _ := net.InterfaceAddrs()
+	for _, x := range addrs {
+		if p, err := netip.ParsePrefix(x.String()); err == nil && p.Addr().Unmap() == a {
+			return true
+		}
+	}
+	return false
+}

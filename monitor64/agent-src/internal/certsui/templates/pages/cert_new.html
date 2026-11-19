@@ -1,0 +1,110 @@
+{{define "content"}}
+{{$d := .Data}}
+<h1 class="h4 mb-3"><i class="bi bi-shield-lock text-primary"></i> {{.T "certs.new"}}{{$.Doc "certificates#wege"}}</h1>
+<div class="row g-3">
+	<div class="col-xl-7">
+		<form method="post" action="/certificates" class="card" id="cert-form">
+			<input type="hidden" name="_csrf" value="{{.CSRF}}">
+			<div class="card-header"><i class="bi bi-shield-plus text-primary"></i> {{.T "certs.le_title"}}</div>
+			<div class="card-body small">
+				{{if $d.Error}}<div class="alert alert-danger py-2">{{$d.Error}}</div>{{end}}
+				<label class="form-label fw-semibold" for="names">{{.T "certs.names"}}</label>
+				<textarea class="form-control form-control-sm font-monospace" id="names" name="names" rows="3" required placeholder="nas.example.ipv64.de&#10;*.example.ipv64.de" data-cert-names>{{$d.Names}}</textarea>
+				<div class="form-text mb-3">{{.T "certs.names_hint"}}</div>
+
+				<div class="fw-semibold mb-1">{{.T "certs.method"}}</div>
+				{{range $s := (split "auto ipv64 alias dns http ca self")}}
+				<div class="form-check mb-1">
+					<input class="form-check-input" type="radio" name="source" id="src-{{$s}}" value="{{$s}}"{{if eq $s $d.Source}} checked{{end}}
+						{{if and (or (eq $s "ipv64") (eq $s "alias")) (not $d.DNSReady)}} disabled{{end}}{{if and (eq $s "http") (not $d.HTTPReady)}} disabled{{end}}{{if and (eq $s "dns") (not $d.DNS)}} disabled{{end}}{{if and (eq $s "ca") (not $d.CAs)}} disabled{{end}} data-cert-source>
+					<label class="form-check-label" for="src-{{$s}}"><strong>{{$.T (print "certs.src." $s)}}</strong> – {{$.T (print "certs.src_hint." $s)}}</label>
+					{{if and (or (eq $s "ipv64") (eq $s "alias")) (not $d.DNSReady)}}<div class="text-warning-emphasis" data-why="{{$s}}"><i class="bi bi-lock"></i> {{$.T "certs.why.nokey"}}: <a href="/settings#ipv64">{{$.T "certs.why.nokey_link"}}</a></div>{{end}}
+					{{if and (eq $s "dns") (not $d.DNS)}}<div class="text-warning-emphasis" data-why="dns"><i class="bi bi-lock"></i> {{$.T "certs.why.nodns"}}: <a href="/certificates/dns-accounts/new">{{$.T "certs.why.nodns_link"}}</a></div>{{end}}
+					{{if and (eq $s "http") (not $d.HTTPReady)}}<div class="text-warning-emphasis" data-why="http"><i class="bi bi-lock"></i> {{$.T "certs.why.nohttp"}}</div>{{end}}
+					{{if and (eq $s "ca") (not $d.CAs)}}<div class="text-warning-emphasis" data-why="ca"><i class="bi bi-lock"></i> {{$.T "certs.why.noca"}}: <a href="/certificates/ca/new">{{$.T "certs.why.noca_link"}}</a></div>{{end}}
+				</div>
+				{{end}}
+				{{if $d.DomainsErr}}<div class="text-danger mb-2">{{$d.DomainsErr}}</div>{{end}}
+				{{if $d.Domains}}<div class="form-text mb-2">{{.T "certs.your_domains"}} {{range $i, $x := $d.Domains}}{{if $i}}, {{end}}<code>{{$x}}</code>{{end}}</div>{{end}}
+
+				<div class="border rounded p-2 mb-3" data-ca-box>
+					<div class="row g-2">
+						<div class="col-sm-8"><label class="form-label" for="ca_id">{{.T "certs.ca.which"}}</label>
+							<select class="form-select form-select-sm" id="ca_id" name="ca_id">{{range $d.CAs}}<option value="{{.ID}}"{{if eq .ID $d.CAID}} selected{{end}}>{{.Name}}</option>{{end}}</select></div>
+						<div class="col-sm-4"><label class="form-label" for="days">{{.T "certs.ca.days"}}</label>
+							<input class="form-control form-control-sm" type="number" id="days" name="days" min="1" max="825" value="{{$d.Days}}"></div>
+					</div>
+					<div class="form-text">{{.T "certs.ca.names_hint"}}</div>
+				</div>
+				<div class="mb-3" data-key-box>
+					<label class="form-label" for="key_type">{{.T "certs.self.key_type"}}</label>
+					<select class="form-select form-select-sm" id="key_type" name="key_type" style="max-width:24rem">
+						<option value="ecdsa"{{if and (ne $d.KeyType "rsa") (ne $d.KeyType "rsa4096")}} selected{{end}}>ECDSA P-256</option>
+						<option value="rsa"{{if eq $d.KeyType "rsa"}} selected{{end}}>RSA 2048 ({{.T "certs.ca.rsa_hint"}})</option>
+						<option value="rsa4096"{{if eq $d.KeyType "rsa4096"}} selected{{end}}>RSA 4096</option>
+					</select>
+				</div>
+				<div class="border rounded p-2 mb-3" data-self-box>
+					<div class="row g-2">
+						<div class="col-sm-4"><label class="form-label" for="self_days">{{.T "certs.ca.days"}}</label>
+							<input class="form-control form-control-sm" type="number" id="self_days" name="self_days" min="1" max="825" value="{{$d.Days}}"></div>
+					</div>
+					<div class="form-text">{{.T "certs.self.hint"}}</div>
+				</div>
+				<div class="border rounded p-2 mb-3" data-acme-box>
+					<label class="form-label" for="acme_ca">{{.T "certs.acme.which"}}</label>
+					<select class="form-select form-select-sm" id="acme_ca" name="acme_ca"><option value="0">Let's Encrypt</option>{{range $d.ACME}}<option value="{{.ID}}"{{if eq .ID $d.ACMECA}} selected{{end}}>{{.Name}}</option>{{end}}</select>
+					<div class="form-text"><a href="/certificates/acme/new">{{.T "certs.acme.new"}}</a></div>
+				</div>
+				<div class="border rounded p-2 mb-3" data-dns-box>
+					<label class="form-label" for="dns_account">{{.T "certs.dns.account"}}</label>
+					<select class="form-select form-select-sm" id="dns_account" name="dns_account">{{range $d.DNS}}<option value="{{.ID}}"{{if eq .ID $d.DNSAccount}} selected{{end}}>{{.Name}} ({{.ProviderName}})</option>{{end}}</select>
+					<div class="form-text">{{.T "certs.dns.account_hint"}} <a href="/certificates/dns-accounts/new">{{.T "certs.dns.new"}}</a></div>
+				</div>
+				<div class="border rounded p-2 mb-3" data-alias-box>
+					<div class="row g-2">
+						<div class="col-sm-7"><label class="form-label" for="alias_zone">{{.T "certs.alias_zone"}}</label>
+							{{if $d.Domains}}<select class="form-select form-select-sm" id="alias_zone" name="alias_zone" data-alias-zone>{{range $d.Domains}}<option value="{{.}}"{{if eq . $d.AliasZone}} selected{{end}}>{{.}}</option>{{end}}</select>
+							{{else}}<input class="form-control form-control-sm font-monospace" id="alias_zone" name="alias_zone" value="{{$d.AliasZone}}" placeholder="example.ipv64.de" data-alias-zone>{{end}}</div>
+						<div class="col-sm-5"><label class="form-label" for="alias_prefix">{{.T "certs.alias_prefix"}}</label>
+							<input class="form-control form-control-sm font-monospace" id="alias_prefix" name="alias_prefix" value="{{$d.AliasPref}}" placeholder="le" maxlength="63" data-alias-prefix></div>
+					</div>
+					<div class="form-text">{{.T "certs.alias_hint"}}</div>
+					<div class="font-monospace mt-1 text-break" data-alias-preview></div>
+				</div>
+
+				<div class="form-check form-switch mb-2"><input class="form-check-input" type="checkbox" name="staging" id="staging"{{if $d.Staging}} checked{{end}}><label class="form-check-label" for="staging">{{.T "certs.staging"}}</label>
+					<div class="form-text">{{.T "certs.staging_hint"}}</div></div>
+				{{if not $d.Account.TOSAccepted}}<div class="form-check mb-2"><input class="form-check-input" type="checkbox" id="accept_tos" name="accept_tos" required>
+					<label class="form-check-label" for="accept_tos">{{.T "certs.tos_accept"}} <a href="{{$d.Account.TOSURL}}" target="_blank" rel="noopener">{{.T "certs.tos_link"}}</a></label></div>{{end}}
+			</div>
+			<div class="card-footer d-flex gap-2">
+				<button class="btn btn-primary btn-sm" type="submit"><i class="bi bi-shield-check"></i> {{.T "certs.request"}}</button>
+				<a class="btn btn-outline-secondary btn-sm" href="/certificates">{{.T "common.cancel"}}</a>
+			</div>
+		</form>
+	</div>
+	<div class="col-xl-5">
+		<form method="post" action="/certificates/upload" enctype="multipart/form-data" class="card">
+			<input type="hidden" name="_csrf" value="{{.CSRF}}">
+			<div class="card-header"><i class="bi bi-upload text-primary"></i> {{.T "certs.upload_title"}}{{$.Doc "certificates#upload"}}</div>
+			<div class="card-body small">
+				{{if $d.UploadErr}}<div class="alert alert-danger py-2">{{$d.UploadErr}}</div>{{end}}
+				<p class="text-body-secondary">{{.T "certs.upload_hint"}}</p>
+				<label class="form-label fw-semibold" for="cert_file">{{.T "certs.upload_cert"}}</label>
+				<input class="form-control form-control-sm mb-1" type="file" id="cert_file" name="cert_file" accept=".pem,.crt,.cer,.pfx,.p12">
+				<textarea class="form-control form-control-sm font-monospace mb-2" name="cert" rows="3" placeholder="-----BEGIN CERTIFICATE-----" aria-label="{{.T "certs.upload_cert"}}"></textarea>
+				<label class="form-label fw-semibold" for="key_file">{{.T "certs.upload_key"}}</label>
+				<input class="form-control form-control-sm mb-1" type="file" id="key_file" name="key_file" accept=".pem,.key">
+				<textarea class="form-control form-control-sm font-monospace mb-2" name="key" rows="3" placeholder="-----BEGIN PRIVATE KEY-----" aria-label="{{.T "certs.upload_key"}}" autocomplete="off"></textarea>
+				<label class="form-label" for="key_password">{{.T "certs.upload_password"}}</label>
+				<input class="form-control form-control-sm mb-1" type="password" id="key_password" name="key_password" autocomplete="off" maxlength="256">
+				<div class="form-text mb-2">{{.T "certs.upload_password_hint"}}</div>
+				<div class="form-text mb-2">{{.T "certs.upload_safe"}}</div>
+				<button class="btn btn-primary btn-sm" type="submit"><i class="bi bi-upload"></i> {{.T "certs.upload"}}</button>
+			</div>
+		</form>
+	</div>
+</div>
+{{end}}
+{{define "scripts"}}<script src="/static/js/certs.js?v={{.Version}}"></script>{{end}}

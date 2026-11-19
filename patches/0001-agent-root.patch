@@ -12,10 +12,10 @@ index d8df144..28095e3 100644
  func (c *bsdCollector) Collect(ctx context.Context, sections []string) *m64proto.Report {
  	return m64bsd.Collect(ctx, m64bsd.Options{Sections: sections, Cache: c.cache})
 diff --git a/cmd/monitor64-agent/collector_linux.go b/cmd/monitor64-agent/collector_linux.go
-index df0bbab..5fc40b2 100644
+index 352dd53..908a305 100644
 --- a/cmd/monitor64-agent/collector_linux.go
 +++ b/cmd/monitor64-agent/collector_linux.go
-@@ -11,14 +11,19 @@ import (
+@@ -12,16 +12,21 @@ import (
  )
  
  // linuxCollector liest die Werte ueber m64linux (eigener Puffer fuer SMART/Updates).
@@ -31,8 +31,10 @@ index df0bbab..5fc40b2 100644
 +}
  
  func (c *linuxCollector) Collect(ctx context.Context, sections []string) *m64proto.Report {
--	return m64linux.Collect(ctx, m64linux.Options{Sections: sections, Cache: c.cache})
-+	return m64linux.Collect(ctx, m64linux.Options{Sections: sections, Root: c.root, Cache: c.cache})
+ 	// dnf-Logs in den eigenen Ordner: /var/log ist unter ProtectSystem=strict schreibgeschuetzt (#169) - wirkt auch
+ 	// bei bestehenden Installationen, deren Unit der Agent selbst nicht aendern darf
+-	return m64linux.Collect(ctx, m64linux.Options{Sections: sections, Cache: c.cache, PkgLogDir: filepath.Join(stateDir, "dnf")})
++	return m64linux.Collect(ctx, m64linux.Options{Sections: sections, Root: c.root, Cache: c.cache, PkgLogDir: filepath.Join(stateDir, "dnf")})
  }
  
  func (c *linuxCollector) Caps() []string {

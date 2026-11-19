@@ -1,0 +1,553 @@
+package filter
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/netip"
+	"os"
+	"path/filepath"
+	"runtime/debug"
+	"slices"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+type List struct {
+	Name string `json:"name"`
+	URL  string `json:"url"`
+}
+
+// DefaultLists is the "balanced" preset: good coverage with few false positives.
+// The order matters for old installations (list-<index>.txt, see migrateFiles).
+var DefaultLists = []List{
+	{"StevenBlack Unified", "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"},
+	{"AdGuard DNS Filter", "https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt"},
+	{"OISD Small", "https://small.oisd.nl/"},
+	{"HaGeZi Multi Normal", "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/multi.txt"},
+	{"EasyPrivacy", "https://easylist.to/easylist/easyprivacy.txt"},
+	{"URLhaus Malware", "https://malware-filter.gitlab.io/malware-filter/urlhaus-filter-agh.txt"},
+}
+
+// MoreLists are offered in the settings but off by default (all checked for maintenance on 2026-10-19).
+var MoreLists = []List{
+	{"OISD Big", "https://big.oisd.nl/"},
+	{"HaGeZi Pro", "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/pro.txt"},
+	{"HaGeZi Threat Intelligence", "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/tif.txt"},
+	{"HaGeZi Pro++", hagezi + "pro.plus.txt"},
+	{"HaGeZi Ultimate", hagezi + "ultimate.txt"},
+	{"HaGeZi Pop-up Ads", hagezi + "popupads.txt"},
+	{"Peter Lowe's Ad Servers", "https://pgl.yoyo.org/adservers/serverlist.php?hostformat=adblock&showintro=0&mimetype=plaintext"},
+	{"HaGeZi Fake (Fake-Shops, Abo-Fallen)", hagezi + "fake.txt"},
+	{"Phishing Filter (malware-filter)", "https://malware-filter.gitlab.io/malware-filter/phishing-filter-agh.txt"},
+	{"HaGeZi Badware Hoster", hagezi + "hoster.txt"},
+	{"HaGeZi DoH/VPN/Proxy Bypass", hagezi + "doh-vpn-proxy-bypass.txt"},
+	{"HaGeZi Native Tracker Samsung", hagezi + "native.samsung.txt"},
+	{"HaGeZi Native Tracker LG webOS", hagezi + "native.lgwebos.txt"},
+	{"HaGeZi Native Tracker Amazon", hagezi + "native.amazon.txt"},
+	{"HaGeZi Native Tracker Apple", hagezi + "native.apple.txt"},
+	{"HaGeZi Native Tracker Windows/Office", hagezi + "native.winoffice.txt"},
+	{"HaGeZi Native Tracker Xiaomi", hagezi + "native.xiaomi.txt"},
+	{"HaGeZi Native Tracker Huawei", hagezi + "native.huawei.txt"},
+	{"HaGeZi Native Tracker TikTok", hagezi + "native.tiktok.txt"},
+	{"HaGeZi Native Tracker Roku", hagezi + "native.roku.txt"},
+	{"HaGeZi Gambling", hagezi + "gambling.txt"},
+	{"HaGeZi NSFW", hagezi + "nsfw.txt"},
+	{"OISD NSFW", "https://nsfw.oisd.nl/"},
+}
+
+const hagezi = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/"
+
+// Categories of the presets (for a badge in the settings): ads, privacy, security, device, bypass, kids.
+var categories = map[string]string{
+	"https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts":    "ads",
+	"https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt": "ads",
+	"https://small.oisd.nl/":                       "ads",
+	hagezi + "multi.txt":                           "ads",
+	"https://easylist.to/easylist/easyprivacy.txt": "privacy",
+	"https://malware-filter.gitlab.io/malware-filter/urlhaus-filter-agh.txt": "security",
+	"https://big.oisd.nl/":  "ads",
+	hagezi + "pro.txt":      "ads",
+	hagezi + "tif.txt":      "security",
+	hagezi + "pro.plus.txt": "ads",
+	hagezi + "ultimate.txt": "ads",
+	hagezi + "popupads.txt": "ads",
+	"https://pgl.yoyo.org/adservers/serverlist.php?hostformat=adblock&showintro=0&mimetype=plaintext": "ads",
+	hagezi + "fake.txt": "security",
+	"https://malware-filter.gitlab.io/malware-filter/phishing-filter-agh.txt": "security",
+	hagezi + "hoster.txt":               "security",
+	hagezi + "doh-vpn-proxy-bypass.txt": "bypass",
+	hagezi + "native.samsung.txt":       "device",
+	hagezi + "native.lgwebos.txt":       "device",
+	hagezi + "native.amazon.txt":        "device",
+	hagezi + "native.apple.txt":         "device",
+	hagezi + "native.winoffice.txt":     "device",
+	hagezi + "native.xiaomi.txt":        "device",
+	hagezi + "native.huawei.txt":        "device",
+	hagezi + "native.tiktok.txt":        "device",
+	hagezi + "native.roku.txt":          "device",
+	hagezi + "gambling.txt":             "kids",
+	hagezi + "nsfw.txt":                 "kids",
+	"https://nsfw.oisd.nl/":             "kids",
+}
+
+// Retired are presets that were removed; saved settings drop them (unless added as an own list).
+// Phishing Army: licence CC BY-NC (non-commercial only), Phishing Filter (CC0) covers phishing instead.
+var Retired = map[string]bool{
+	"https://phishing.army/download/phishing_army_blocklist_extended.txt": true,
+}
+
+// Category of a preset list ("" = own list).
+func Category(url string) string { return categories[url] }
+
+const defaultInterval = 24 * time.Hour
+
+var maxListSize int64 = 64 << 20 // je Liste; groessere werden an der letzten ganzen Zeile gekuerzt (Variable fuer Tests)
+
+type ListStatus struct {
+	List
+	Rules     int       `json:"rules"`
+	UpdatedAt time.Time `json:"updatedAt"`
+	Error     string    `json:"error,omitempty"`
+	Failures  int       `json:"failures"`        // Fehlversuche hintereinander
+	Hint      string    `json:"hint,omitempty"`  // HintIPList: geladen, aber nur IP-Adressen statt Namen (#164)
+	Skipped   int       `json:"skipped"`         // Zeilen ohne DNS-Regel (nicht erkannt, z. B. Browser-Regeln, IP-Adressen)
+	Limit     int       `json:"limit,omitempty"` // bei HintRuleLimit: geltende Gesamtgrenze (nach dem Speicher)
+}
+
+// HintIPList: die Liste enthaelt IP-Adressen bzw. Netze statt Domains (z. B. Honeypot- oder Firewall-Listen). DNS64
+// sperrt Namen; solche Listen gehoeren in PROXY64 (Blocklisten) bzw. die Firewall.
+const HintIPList = "ip_list"
+
+// HintRuleLimit: die Gesamtgrenze aller Listen (maxRules) ist erreicht, von dieser Liste fehlen Regeln.
+const HintRuleLimit = "rule_limit"
+
+// Manager downloads the blocklists, keeps them cached on disk and publishes
+// a fresh Matcher after every update without interrupting DNS traffic.
+type Manager struct {
+	dir      string
+	lists    []List
+	interval time.Duration
+	client   *http.Client
+	log      *slog.Logger
+	Allow    *Allowlist
+	Deny     *Allowlist // eigene Sperrliste (nil = keine)
+	Release  *Manager   // Freigabe-Listen aus dem Netz (nil = keine); gelten fuer alle Geraete und Gruppen
+	release  bool       // dieser Manager haelt Freigabe-Listen (jede Regel = Freigabe)
+
+	cur       atomic.Pointer[Matcher]
+	notGlobal atomic.Uint64 // complement of the lists for devices without a group (zero value = all lists)
+	rebuildMu sync.Mutex    // one rebuild at a time; parallel downloads trigger it
+
+	mu      sync.RWMutex
+	status  []ListStatus
+	updated time.Time
+}
+
+// NewManager loads the given lists (nil = DefaultLists) from disk; Run keeps them fresh every interval
+// (0 = 24 h).
+func NewManager(dir string, lists []List, interval time.Duration, allow *Allowlist, client *http.Client, log *slog.Logger) (*Manager, error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+	if lists == nil {
+		lists = DefaultLists
+	}
+	if interval <= 0 {
+		interval = defaultInterval
+	}
+	if len(lists) > MaxLists {
+		log.Warn("too many blocklists, the rest is ignored", "lists", len(lists), "max", MaxLists)
+		lists = lists[:MaxLists]
+	}
+	m := &Manager{dir: dir, lists: lists, interval: interval, client: client, log: log, Allow: allow}
+	m.migrateFiles()
+	m.status = make([]ListStatus, len(m.lists))
+	for i, l := range m.lists {
+		m.status[i].List = l
+	}
+	// Serve cached lists right away; downloads happen in Run.
+	m.rebuild()
+	return m, nil
+}
+
+// NewReleaseManager laedt Freigabe-Listen (Domains, die keine Blockliste sperren soll) wie NewManager;
+// lists = nil heisst keine. Jede Regel einer Liste zaehlt als Freigabe, auch Ausnahmen (@@||example.com^).
+func NewReleaseManager(dir string, lists []List, interval time.Duration, client *http.Client, log *slog.Logger) (*Manager, error) {
+	if lists == nil {
+		lists = []List{}
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+	if interval <= 0 {
+		interval = defaultInterval
+	}
+	if len(lists) > MaxLists {
+		lists = lists[:MaxLists]
+	}
+	m := &Manager{dir: dir, lists: lists, interval: interval, client: client, log: log, release: true}
+	m.status = make([]ListStatus, len(m.lists))
+	for i, l := range m.lists {
+		m.status[i].List = l
+	}
+	if len(m.lists) > 0 { // ohne Listen kein Matcher (Released prueft dann nichts)
+		m.rebuild()
+	}
+	return m, nil
+}
+
+// Released: name steht in einer der Freigabe-Listen (list = deren Name).
+func (m *Manager) Released(name string) (list string, ok bool) {
+	if m == nil || len(m.lists) == 0 {
+		return "", false
+	}
+	ok, list = m.cur.Load().Match(name)
+	return list, ok
+}
+
+// Exempt: name ist freigegeben (eigene Freigabe oder Freigabe-Liste, fuer alle Geraete und Gruppen); dann
+// sperrt auch kein CNAME-Ziel. Ohne Freigabe-Listen kostet die Pruefung fast nichts.
+func (m *Manager) Exempt(name string) bool {
+	if m.Allow.Contains(name) {
+		return true
+	}
+	_, ok := m.Release.Released(name)
+	return ok
+}
+
+// ReleasedPrefix marks the reason of a released domain that a list would block ("released:<list>").
+const ReleasedPrefix = "released:"
+
+func (m *Manager) Matcher() *Matcher { return m.cur.Load() }
+
+// Check decides whether name is blocked for devices without a group. reason names the blocking list, or
+// notes that a released domain would otherwise have been blocked.
+func (m *Manager) Check(name string) (blocked bool, reason string) {
+	return m.CheckMask(name, m.Global())
+}
+
+// CheckMask is Check with the lists of a device group (Mask).
+func (m *Manager) CheckMask(name string, mask uint64) (blocked bool, reason string) {
+	// eigene Sperrliste vor den Blocklisten; eine genauere (oder gleiche) Freigabe gewinnt
+	if d, ok := m.Deny.Match(name); ok {
+		if a, ok := m.Allow.Match(name); !ok || len(a) < len(d) {
+			return true, OwnPrefix + d
+		}
+	}
+	blocked, list := m.cur.Load().MatchMask(name, mask)
+	if blocked && m.Allow.Contains(name) {
+		return false, ReleasedPrefix + list // UI: "freigegeben (sonst: <list>)"
+	}
+	if blocked {
+		if _, ok := m.Release.Released(name); ok { // Freigabe-Liste schlaegt Blockliste (nicht die eigene Sperrliste)
+			return false, ReleasedPrefix + list
+		}
+	}
+	return blocked, list
+}
+
+// OwnPrefix kennzeichnet Sperren der eigenen Sperrliste im Grund ("own:<Eintrag>").
+const OwnPrefix = "own:"
+
+// Mask is the bit mask of the given lists (by URL) among the loaded ones; unknown URLs are skipped.
+func (m *Manager) Mask(urls []string) uint64 {
+	var mask uint64
+	for _, u := range urls {
+		for i, l := range m.lists {
+			if l.URL == u {
+				mask |= 1 << uint(i)
+			}
+		}
+	}
+	return mask
+}
+
+// SetGlobal sets the lists for devices without a group.
+func (m *Manager) SetGlobal(mask uint64) { m.notGlobal.Store(^mask) }
+
+// Global is the mask for devices without a group.
+func (m *Manager) Global() uint64 { return ^m.notGlobal.Load() }
+
+// Rename aendert den Anzeigenamen einer Liste ohne Neuaufbau (Grund im Abfrage-Log, Status, Suche); false = URL
+// nicht geladen.
+func (m *Manager) Rename(url, name string) bool {
+	m.rebuildMu.Lock()
+	defer m.rebuildMu.Unlock()
+	i := slices.IndexFunc(m.lists, func(l List) bool { return l.URL == url })
+	if i < 0 {
+		return false
+	}
+	m.lists[i].Name = name
+	if cur := m.cur.Load(); cur != nil && i < len(cur.names) {
+		n := *cur // Maps bleiben geteilt (nur gelesen), nur die Namen sind neu
+		n.names = slices.Clone(cur.names)
+		n.names[i] = name
+		m.cur.Store(&n)
+	}
+	m.mu.Lock()
+	if i < len(m.status) {
+		m.status[i].Name = name
+	}
+	m.mu.Unlock()
+	return true
+}
+
+func (m *Manager) Status() ([]ListStatus, time.Time) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return append([]ListStatus(nil), m.status...), m.updated
+}
+
+// Run refreshes stale lists immediately and then once per interval.
+func (m *Manager) Run(ctx context.Context) {
+	wait := 2 * time.Second // let the DNS listener come up; downloads resolve through it
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
+		if m.refresh(ctx) {
+			wait = 5 * time.Minute
+		} else {
+			wait = time.Hour
+		}
+	}
+}
+
+// path is the cache file of list i, named after its URL so lists can be added, removed and reordered.
+func (m *Manager) path(i int) string { return fileFor(m.dir, m.lists[i].URL) }
+
+func fileFor(dir, url string) string {
+	h := sha256.Sum256([]byte(url))
+	return filepath.Join(dir, "list-"+hex.EncodeToString(h[:6])+".txt")
+}
+
+// migrateFiles renames cache files of older versions (list-<index of DefaultLists>.txt).
+func (m *Manager) migrateFiles() {
+	for i, l := range DefaultLists {
+		old := filepath.Join(m.dir, fmt.Sprintf("list-%d.txt", i))
+		if _, err := os.Stat(old); err != nil {
+			continue
+		}
+		if _, err := os.Stat(fileFor(m.dir, l.URL)); err == nil {
+			continue
+		}
+		_ = os.Rename(old, fileFor(m.dir, l.URL))
+	}
+}
+
+// PruneFiles removes cache files in dir of lists that are not in urls (removed from the settings), so old
+// downloads do not pile up under lists/. The caller passes every configured list, also switched off ones and those
+// only used by device groups; a list added again is simply downloaded again. Downloads in progress (.tmp) stay.
+func PruneFiles(dir string, urls []string) {
+	keep := map[string]bool{}
+	for _, u := range urls {
+		keep[filepath.Base(fileFor(dir, u))] = true
+	}
+	names, _ := filepath.Glob(filepath.Join(dir, "list-*.txt"))
+	for _, p := range names {
+		if !keep[filepath.Base(p)] {
+			_ = os.Remove(p)
+		}
+	}
+}
+
+// refresh downloads stale lists in parallel and reports whether any download
+// failed. Each list goes live as soon as it arrives, so one slow server does
+// not hold back the others.
+func (m *Manager) refresh(ctx context.Context) (failed bool) {
+	var wg sync.WaitGroup
+	for i, l := range m.lists {
+		if fi, err := os.Stat(m.path(i)); err == nil && time.Since(fi.ModTime()) < m.interval {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cut, err := m.download(ctx, l.URL, m.path(i))
+			m.mu.Lock()
+			switch {
+			case err != nil:
+				failed = true
+				m.status[i].Error = err.Error()
+				m.status[i].Failures++
+				m.log.Warn("blocklist download failed", "list", l.Name, "err", err)
+			case cut: // Hinweis an der Liste, kein Fehlversuch (keine Meldung, kein schnelleres Wiederholen)
+				m.status[i].Error, m.status[i].Failures = fmt.Sprintf("list larger than %d MB: only the first %d MB are used", maxListSize>>20, maxListSize>>20), 0
+				m.log.Warn("blocklist truncated", "list", l.Name, "max_mb", maxListSize>>20)
+			default:
+				m.status[i].Error, m.status[i].Failures = "", 0
+			}
+			m.mu.Unlock()
+			if err == nil {
+				m.rebuild()
+			}
+		}()
+	}
+	wg.Wait()
+	return failed
+}
+
+// download laedt eine Liste nach dst. Groesser als maxListSize: die ersten maxListSize Bytes bis zur letzten ganzen
+// Zeile bleiben, cut = true (bisher still abgeschnitten, ggf. mitten in einem Namen; Forum 5057).
+func (m *Manager) download(ctx context.Context, url, dst string) (cut bool, err error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("User-Agent", "Node64-DNS64/1.0")
+	resp, err := m.client.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("HTTP %s", resp.Status)
+	}
+	tmp := dst + ".tmp"
+	f, err := os.Create(tmp)
+	if err != nil {
+		return false, err
+	}
+	n, err := io.Copy(f, io.LimitReader(resp.Body, maxListSize+1))
+	if err == nil && n > maxListSize {
+		cut = true
+		err = truncateToLine(f, maxListSize)
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil && n == 0 {
+		err = fmt.Errorf("empty response")
+	}
+	if err != nil {
+		os.Remove(tmp)
+		return false, err
+	}
+	return cut, os.Rename(tmp, dst)
+}
+
+// truncateToLine kuerzt f auf hoechstens limit Bytes, endend nach dem letzten Zeilenumbruch davor.
+func truncateToLine(f *os.File, limit int64) error {
+	off := max(0, limit-64<<10)
+	buf := make([]byte, limit-off)
+	if _, err := f.ReadAt(buf, off); err != nil {
+		return err
+	}
+	end := off
+	if i := bytes.LastIndexByte(buf, '\n'); i >= 0 {
+		end = off + int64(i) + 1
+	}
+	return f.Truncate(end)
+}
+
+func (m *Manager) rebuild() {
+	m.rebuildMu.Lock()
+	defer m.rebuildMu.Unlock()
+	start := time.Now()
+	names := make([]string, len(m.lists))
+	for i, l := range m.lists {
+		names[i] = l.Name
+	}
+	hint := 1 << 18
+	if m.release { // Freigabe-Listen sind meist klein: Platz nach Dateigroesse statt fuer eine grosse Blockliste
+		var size int64
+		for i := range m.lists {
+			if fi, err := os.Stat(m.path(i)); err == nil {
+				size += fi.Size()
+			}
+		}
+		hint = int(min(size/48, 1<<18)) // gut 20 Byte je Zeile, verteilt auf zwei Maps
+	}
+	mt := newMatcherSize(names, hint)
+	counts := make([]int, len(m.lists))
+	hints := make([]string, len(m.lists))
+	mtimes := make([]time.Time, len(m.lists))
+	for i := range m.lists {
+		f, err := os.Open(m.path(i))
+		if err != nil {
+			continue
+		}
+		if fi, err := f.Stat(); err == nil {
+			mtimes[i] = fi.ModTime()
+		}
+		counts[i], err = mt.loadAs(i, f, m.release)
+		if err != nil {
+			m.log.Warn("blocklist parse error", "list", m.lists[i].Name, "err", err)
+		}
+		if _, err := f.Seek(0, io.SeekStart); err == nil && ipList(f) {
+			hints[i] = HintIPList
+		}
+		if n := mt.Limited(i); n > 0 {
+			hints[i] = HintRuleLimit
+			m.log.Warn("blocklist rule limit reached", "list", m.lists[i].Name, "missing", n, "max", maxRules)
+		}
+		f.Close()
+	}
+	old := m.cur.Swap(mt)
+
+	m.mu.Lock()
+	for i := range m.status {
+		m.status[i].Rules = counts[i]
+		m.status[i].Skipped = mt.Skipped(i)
+		m.status[i].Hint = hints[i]
+		m.status[i].Limit = 0
+		if hints[i] == HintRuleLimit {
+			m.status[i].Limit = maxRules
+		}
+		m.status[i].UpdatedAt = mtimes[i]
+	}
+	m.updated = time.Now()
+	m.mu.Unlock()
+
+	// The old matcher can be large; hand the memory back promptly (Freigabe-Listen nur nach einem grossen).
+	if !m.release || (old != nil && old.Size() >= 1<<16) {
+		debug.FreeOSMemory()
+	}
+	if m.release {
+		m.log.Info("allow lists loaded", "domains", mt.Size(), "took", time.Since(start).Round(time.Millisecond))
+		return
+	}
+	m.log.Info("blocklists loaded", "domains", mt.Size(), "took", time.Since(start).Round(time.Millisecond))
+}
+
+// ipList meldet, ob eine Liste aus IP-Adressen bzw. Netzen besteht: unter den ersten 200 Zeilen mit Inhalt mindestens
+// eine und mehr als die Haelfte, die nur eine IP-Adresse oder ein Netz enthalten (hosts-Zeilen "0.0.0.0 name" nicht).
+func ipList(r io.Reader) bool {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 4096), 1<<16)
+	n, ips := 0, 0
+	for sc.Scan() && n < 200 {
+		ln := strings.TrimSpace(sc.Text())
+		if ln == "" || ln[0] == '#' || ln[0] == ';' || ln[0] == '!' {
+			continue
+		}
+		if i := strings.IndexByte(ln, '#'); i > 0 {
+			ln = strings.TrimSpace(ln[:i])
+		}
+		n++
+		fs := strings.Fields(ln)
+		if len(fs) != 1 {
+			continue
+		}
+		f := fs[0]
+		if _, err := netip.ParseAddr(f); err == nil {
+			ips++
+		} else if _, err := netip.ParsePrefix(f); err == nil {
+			ips++
+		}
+	}
+	return ips > 0 && ips*2 > n
+}

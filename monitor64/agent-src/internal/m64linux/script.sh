@@ -278,14 +278,24 @@ if [ -d /run/systemd/system ] && m64_have systemctl; then
 	fi
 fi
 
+# Stand der Paketdatenbank (Groesse, Aenderungszeit; Liste wie pkgFiles in collect.go): aendert er sich, liest die
+# Node die Updates neu, statt bis zu einer Stunde zu warten (#159)
+if m64_have stat; then
+	m64_sec pkgstamp
+	for m64_f in /var/lib/dpkg/status /var/lib/apt/lists /var/lib/rpm/rpmdb.sqlite /var/lib/rpm/Packages /usr/lib/sysimage/rpm/rpmdb.sqlite /usr/lib/sysimage/rpm/Packages /var/lib/pacman/local /var/lib/pacman/sync /lib/apk/db/installed /var/lib/opkg/status /usr/lib/opkg/status; do
+		[ -e "$m64_f" ] && stat -c '%n %s %Y' "$m64_f" 2>/dev/null
+	done
+fi
 if [ "$m64_updates" = 1 ]; then
 	# RHEL: Python-Aufruf, daher nur mit den Updates (hoechstens stuendlich)
 	if [ ! -e /var/run/reboot-required ] && m64_have needs-restarting; then
-		m64_run TERM 30 needs-restarting -r >/dev/null 2>&1
+		# Ausgabe mitgeben: dnf meldet auch bei einem Fehler (Config error ...) Exit 1 - das ist kein "Neustart noetig"
+		m64_o=$(m64_run TERM 30 needs-restarting -r 2>&1)
 		m64_rc=$?
 		if ! m64_timedout "$m64_rc"; then
 			m64_sec needs_restarting
 			echo "$m64_rc"
+			printf '%s\n' "$m64_o" | m64_mask | head -n 20
 		fi
 	fi
 	m64_done=0

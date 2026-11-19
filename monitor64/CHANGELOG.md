@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.11-1
+
+- Agent auf 0.1.11 (Upstream 1.7.10): eingebetteten Quellbaum auf den Tag-Stand
+  gezogen, Patch für den Agent-Root gegen 0.1.11 neu erzeugt.
+- Versionierung umgestellt: führende Zahl ist die Agent-Version, was hinter dem
+  Bindestrich steht, zählt nur die Add-on-Änderungen.
+
 ## 0.1.2-9
 
 - Eingebetteten Agenten auf Upstream-Stand 1.7.0 gezogen (Agent 0.1.6), Patch für den

@@ -1,0 +1,1096 @@
+# Changes – PROXY64
+
+## 1.57.0 – 2026-11-19
+
+### Added
+- CDN64 quota: the dashboard card, the setup wizard and the metrics now show the CDN subdomains next to the CDN domains (names below a domain that is already in CDN64; per account, e.g. Free 2, Home/Supporter 5, unlimited from Business).
+
+### Fixed
+- When a limit is reached, PROXY64 now names the right one – CDN domains, CDN subdomains, port mappings or tunnels. Before, every limit read "The CDN domain limit is used up", even when subdomains or port mappings were full.
+- CDN64 tunnel after an internet outage: every failed attempt during the outage counted as "UDP blocked", afterwards the tunnel stayed on the slower TCP fallback and kept showing "UDP blocked". Now the node tries TCP right after a failed QUIC attempt; only if that works is UDP considered blocked – if the whole network is gone, QUIC stays the first attempt. While the tunnel runs over TCP it checks every 5 minutes whether QUIC works again and switches back seamlessly as soon as no visitor connection is open (after 30 minutes at the latest).
+- If the tunnel breaks in the middle of a connection (e.g. a WebSocket during a network outage), the node now closes the connection to the service at home right away as well. Before, it stayed open until the service sent something itself – with applications allowing one session per user this blocked the new connection.
+- TCP fallback: the tunnel keepalive has more time (30 instead of 15 s). With a slow upload and a lot of traffic (WebSockets, downloads) the tunnel otherwise broke and kept reconnecting under load.
+
+## 1.56.9 – 2026-11-17
+
+### Fixed
+- Country block "allow only these countries": networks on the allow list now also apply to requests whose origin Docker hides (gateway of the bridge network, forum 5189). For the real origin of visitors `network_mode: host` remains the right way (#187).
+
+### Changed
+- CDN64 quota: ipv64.net now counts CDN64 names by domains and subdomains (e.g. `test.ipv64.de` = 1 domain, `nas.test.ipv64.de` = 1 subdomain; Free 1 domain and 2 subdomains, Home/Supporter 5 and 5, Business and Company 10 and 25 domains with unlimited subdomains). The CDN domains tile also shows the subdomains.
+
+## 1.56.8 – 2026-11-17
+
+### Fixed
+- Live views hung since 1.7.6 (forum 5202, e.g. Dockhand: live status, logs): answers to requests without an upload were held back over HTTP/2 until the end or 64 KB – server-sent events and streams did not arrive. HTTP/2 gives even a GET without content an empty upload, which the speed test upload fix from 1.56.7 wrongly waited for. Now only a real upload counts as one, and event streams always go through at once. For names in CDN64 modes 2 and 3, cdn64-edge 0.22.7 fixes the same.
+
+## 1.56.7 – 2026-11-16
+
+### Fixed
+- Uploads broke off when the target answers before it has read the upload – nginx does this with OpenSpeedTest, for example (a POST to a file returns 200 at once). Over HTTP/2 and HTTP/3 PROXY64 then closed the browser's upload, and the speed test showed an upload dropping to almost zero. Firefox also stops sending as soon as the answer is complete. PROXY64 now holds back such an early, small answer, reads the upload to the end (discarded like nginx does, at most 1 GiB or 30 seconds; counted and throttled like any upload) and only then sends the answer – to every browser this looks like a target that reads first and answers afterwards. For names in mode 2 and 3, cdn64-edge 0.22.5 fixes the same on the CDN64 servers.
+- HTTP/3 via CDN64 (mode 1): uploads (e.g. in a speed test) dropped to almost zero after a short time. After MTU discovery the browser sends larger packets than fit into a tunnel datagram; they went through the stream and arrived out of order, which the browser took for loss. After the handshake the tunnel now behaves like a link with a smaller MTU: packets that are too large are dropped and the browser stays with packets that fit. In the lab (30 ms, no loss) HTTP/3 uploads rose from about 3 to more than 450 Mbit/s. The upload fix is on the CDN64 servers (cdn64-edge 0.22.3); this version does the same for downloads.
+
+## 1.56.6 – 2026-11-15
+
+### Changed
+- Security (Docker bridge network): requests arriving with the address of the Docker gateway (userland proxy, IPv6 without ip6tables, some NAS systems, access from the Docker host) have an unknown origin – they may also come from the internet. PROXY64 no longer treats them as home network: entries with private networks in access lists, "own network only" of the web interface under its own name and the "home network" exemption of the limits do not apply; a country block "allow only" rejects them. The Proxy hosts page then shows a hint. Fix: start the container with `network_mode: host` – with Docker's userland proxy (e.g. on some NAS systems) this otherwise affects all devices in the home network.
+
+## 1.56.5 – 2026-11-15
+
+### Fixed
+- HTTP/3 via CDN64 (mode 1): connections dropped after about 10 seconds with some clients. The node now tells the CDN64 server when the handshake is complete (from cdn64-edge 0.22.2).
+
+### Changed
+- Streams via CDN64 (port mapper mode 1/2): UDP to known amplifier services (e.g. DNS 53, NTP 123, memcached 11211) is no longer reachable via the CDN64 servers; in the home network or via own ports the stream keeps working. TCP is not affected.
+
+## 1.56.4 – 2026-11-15
+
+### Fixed
+- Security: connections passed through via CDN64 (mode 1) over HTTP/3 only answer requests for the name they are passed through for – as already over TCP. Other hosts, e.g. ones published only in the home network, are not reachable that way, even if the certificate covers them.
+- Security: connections without SNI must also meet the TLS rules of the requested proxy host (minimum version, BSI, HTTP/1.1 only, HTTP/3), otherwise `421 Misdirected Request`.
+
+## 1.56.3 – 2026-11-15
+
+### Fixed
+- Access log as file: with "Shorten addresses", full client addresses were written to `access.log` for a moment right after start or after switching the file on; now shortened from the start.
+- PROXY protocol from the nodes of the own cluster (#138): behind a node's public address (NAT) any device can send a PROXY header – a private source address from such a header no longer counts (the real address of the connection applies), so nobody gets past "home network only" access lists. Short DNS or database errors no longer empty the list of node addresses; the last state applies.
+
+## 1.56.2 – 2026-11-14
+
+### Fixed
+- HTTP/3: a GET without body reached the target as a request with a body of unknown length (HTTP/2 without end of stream). Targets like lighttpd (e.g. the OPNsense web GUI) answered with `400 Bad Request` – in the normal browser profile that remembered HTTP/3, but not in a private window or with curl (HTTP/2). PROXY64 now forwards such requests without body, as with HTTP/1.1 and HTTP/2 (#157).
+
+## 1.56.1 – 2026-11-14
+
+### Changed
+- User management: values of custom request headers of hosts and locations (often `Authorization` or tokens) for administrators only; "Read only" sees the names with `***` as value (edit page, `GET /api/cdn64/hosts`, `GET /api/cdn64/hosts/{id}`). Passwords and keys of access lists as well as tunnel and list tokens are still not shown to anyone.
+
+## 1.56.0 – 2026-11-14
+
+### New
+- Access log also as a file `/data/cdn64/access.log` in the nginx "combined" format with the host in front, e.g. for CrowdSec (#74): every request of all hosts, including rejected ones; switch on under Access log › Settings, rotates to `access.log.1` at a configurable size (default 50 MB). API: `access_file`, `access_file_mb` in `/api/cdn64/settings`.
+- Nextcloud: a switch under Advanced redirects `/.well-known/caldav` and `/.well-known/carddav` with a 301 to `/remote.php/dav/` (#101).
+- Locations are collapsed (path and target in the row), new ones come via "+ Add location", "Remove" deletes one (#78).
+- Country block: the input suggests countries again after every comma, also searches by country name (German and English) and shows the chosen countries with flag and name (#54).
+- Ports › Shared entry: "Also accept PROXY protocol from the nodes of the own cluster" – the addresses of the other nodes are determined every minute from their cluster addresses and follow a move (#138).
+- API: `GET /api/cdn64/geo/lookup?ip=…` shows which country the country block sees for an address and where it comes from (location or registry).
+
+### Changed
+- Country block by location instead of registration country (#139): PROXY64 decides by the location data of ipv64.net (DB-IP, as Honeypot64 does). AWS/Azure Frankfurt, company networks registered in the US or providers like M247 now count as the country they are located in. The country lists by registry only apply to addresses without a location. The location data (~4.7 MB, about 10 MB in memory) is only loaded while a host or stream uses the country block; status under Security › Blocklists.
+
+### Fixed
+- HTTP/2 with a wildcard certificate (Safari): requests for another host on the same connection no longer get "421 Misdirected Request" if the certificate of the connection covers the host and its TLS requirements are met (#132). Otherwise it stays 421, which is now in the access log.
+- Connections with a PROXY header from a source not listed under "Accept PROXY protocol from" are no longer closed silently: an entry in the container log (at most every 10 minutes per source, with address and hint) and in the access log as "PROXY header from untrusted source" (#138).
+
+## 1.55.2 – 2026-11-13
+
+### Fixed
+- Requests aborted by the visitor (e.g. fast scrolling in Immich) are logged as 499 like nginx and no longer count as "5xx errors" (#120). Real target errors stay 502/504.
+- Asset cache: responses to requests with cookies are only stored if the target explicitly marks them as public (`public`/`s-maxage`); PROXY64 no longer adds `public` for such requests. `s-maxage` is honoured.
+
+## 1.55.1 – 2026-11-11
+
+### Fixed
+- Reachability check switched off: the host no longer keeps showing the old "unreachable" state in the overview and on the dashboard. Health checks on the target can still be created and are shown.
+- Locations: access lists and blocks can no longer be bypassed with a backslash right after a slash (`/%5Cadmin`, relevant for IIS/Windows targets); empty segments and parameter-only segments no longer count when matching or building the target path.
+- Addresses with a session parameter as a separate segment (`/app/;jsessionid=…` from Tomcat/Jetty) are no longer rejected with 400.
+- Host response headers (Advanced) no longer override anything the node sets itself on its own pages (login, block, maintenance, error page, redirect), e.g. `Cache-Control: no-store`, `X-Frame-Options: DENY`, the Basic auth challenge, the login cookie; "remove" only applies to target responses.
+- gRPC: a visitor's Content-Type no longer bypasses the limit of concurrent requests to the target (gRPC streams have their own, larger slots) and no longer switches off the custom error page (the target's response decides).
+- Protocol "automatic": upgrades other than WebSocket (kubectl exec/port-forward, Docker API attach) go over HTTP/1.1 again instead of failing with 502.
+- 100 Continue and 103 Early Hints from the target no longer end up as the status in the access log, statistics and error count.
+- Traefik labels: headers from `headers` middlewares follow later label changes (including removal) as long as they were not changed in the UI.
+
+## 1.55.0 – 2026-11-11
+
+### New
+- Reachability check per proxy host or TLS passthrough host can be switched off ("Check whether the target is reachable" under Details) – for targets without a web interface, e.g. a database; then no "unreachable" badge and no metric (forum 5100). API: `advanced.no_probe`.
+- Country blocking: `EU` stands for the 27 EU member states (expanded when saving), and suggestions also work after the first country (#54).
+
+## 1.54.1 – 2026-11-10
+
+### Fixed
+- Locations: a location's access list, block and settings now also apply to spelling variants of the path – `/SECURE`, `/secure.`, `/secure%20`, `/secure;x` or `/secure\x` now reach the location `/secure` instead of the target unprotected (important for targets that ignore case, e.g. IIS or Windows). The target still gets the path unchanged. Locations that differ only in spelling (`/api` and `/API`) count as duplicates when saving (security review).
+- Paths with segments a target may read as `..` (`..;`, `.. `, `...`) are rejected with 400; for locations with a forward path the rest behind the location arrives correctly for spelling variants too (`/API/x` → `/v1/x`).
+
+## 1.54.0 – 2026-11-09
+
+### New
+- HTTP/2 to the target (#53): for https targets PROXY64 now speaks HTTP/2 when the target offers it – if NTLM/Exchange has problems, set the host to "HTTP/1.1 only". New choice "Protocol to the target" under Advanced (and per location): Automatic (default), HTTP/1.1 only, h2c / cleartext HTTP/2 for gRPC services without TLS such as NetBird Management/Signal (for https targets: HTTP/2 only). API: `advanced.target_http`.
+- gRPC through PROXY64: trailers (`grpc-status`) reach the client, streams run in both directions – locally and via CDN64 mode 2; gRPC responses are never compressed and do not count against the limit of concurrent requests per target. WebSockets keep using HTTP/1.1.
+- PROXY protocol to the target (#52): "TLS passthrough" and TCP streams can send a PROXY header (v1 or v2, like HAProxy `send-proxy`) with the real visitor address to the target – locally, behind a trusted proxy and via CDN64 (mode 1 and port mapper). E.g. for mailcow (Postfix/Dovecot), so the login protection does not lock out the node, or for another reverse proxy with access lists/CrowdSec. Off by default; only switch it on if the target expects the header. UDP streams stay without. API: `advanced.proxy_protocol` or `proxy_protocol` on the stream.
+- Redirect on denied access (#55): per location you can enter an address that visitors are redirected to with 302 when the access list turns them away – e.g. Vaultwarden `/admin` only from the LAN, everyone else lands on `/`. Allowed visitors still get through; if the list asks for a login, the login stays. Relative path or http(s) address, redirect loops are rejected on saving. Works locally and via CDN64; in the access log with status 302 and reason "access list (redirected)". API: `denied_redirect` on the location.
+- Docker/Traefik labels: headers middlewares from the labels (`customResponseHeaders`, STS, `frameDeny`, `contentTypeNosniff`, `referrerPolicy`, CSP, `permissionsPolicy` …) become response headers under “Advanced” – for new hosts and for hosts without their own response headers. Middlewares from files (e.g. `secure-headers@file`) are not visible to PROXY64; the “Skipped” hint now says to add their headers under “Advanced” (forum 5083).
+
+### Fixed
+- Security headers: headers from “Advanced” (set/remove) and HSTS now apply to every response of the host – including block and error pages, access list sign-in, maintenance and redirect hosts, locally and via CDN64 mode 1/2. HSTS replaces a header sent by the target instead of sending it twice (forum 5083).
+- Path at the target: writing back redirects can no longer produce an address on a foreign site (e.g. `/rezepte//evil.com` → `//evil.com`); encoded characters such as `%2F` are kept.
+- Access list sign-in: control characters in the return address are rejected (browsers would have turned them into a redirect to a foreign site).
+
+## 1.53.0 – 2026-11-08
+
+### New
+- Path at the target of a proxy host – e.g. `/rezepte` in front of every request, the address in the browser stays; redirects and cookie paths of the target are written back (#43).
+- Locations can block (error page 400–499) or give a fixed response (e.g. `mta-sts.txt`); "Allow only the locations" blocks every other path (#11).
+- "Advanced" also per location: timeout, upload limit, buffering and headers (e.g. ActiveSync with a long timeout).
+- Custom error page per proxy host when the target is unreachable or overloaded; optionally it also replaces 5xx errors of the target, the status stays (#38).
+- Access lists: `allow self` (own public IP, IPv6 as /64; `self4`/`self6`) and DNS names such as DynDNS names – devices at home get in without a password even via CDN64 (#32). If DynDNS detects DS-Lite/CGNAT, `self` leaves out the IPv4; if a name cannot be resolved, `deny` still applies.
+
+### Fixed
+- API: hosts with large error or maintenance pages can be changed via PUT (up to 1 MiB, beyond that 413 instead of "invalid json").
+- The maintenance page and the custom error page reach visitors in CDN64 mode 2 (until now the CDN64 server showed its own page).
+- Group rows in tables (streams, plans, honeypot) are readable in dark mode.
+
+
+## 1.52.0 – 2026-11-08
+
+### New
+- Behind another proxy (e.g. Traefik, HAProxy) the real visitor address arrives via PROXY protocol v1/v2 – only from
+  listed addresses (Settings → Ports → Common entrance), also via API (`PUT /api/edge`, `proxy_protocol`).
+
+### Fixed
+- Block common exploits no longer blocks sign-ins: OAuth/OIDC with `redirect_uri=https://…` (Home Assistant,
+  Keycloak, Authelia, Nextcloud) and WebDAV pass. Newly detected: path traversal, Log4Shell, commands in parameters
+  and more SQL patterns. Addresses on the allow list are exempt, the matching rule is in the debug log.
+
+## 1.51.0 – 2026-11-08
+
+### New
+- CDN64: packet loss and round trip time are measured per tunnel connection. The self-test shows the round trip time
+  and the packet loss of your line (visitor downloads) per server and warns from 0.5 % that the line slows down
+  downloads via CDN64. The node reports the values to the CDN64 servers every 30 s (from cdn64-edge 0.22.0), so ipv64
+  can see right away whether loss on the line is the cause. New Prometheus value `node64_cdn64_online_edge_loss_ratio`,
+  field `loss_pct` per server in `/api/cdn64/online`.
+
+## 1.50.1 – 2026-11-08
+
+### Fixed
+- Maintenance mode: the access list now applies before the maintenance page (#33). Until now the maintenance page –
+  custom HTML included – could be fetched without signing in and from any address. This also applies to locations with
+  their own list; the sign-in page of the access list keeps working in maintenance mode.
+
+## 1.50.0 – 2026-11-07
+
+### Improved
+- CDN64 mode 1: HTTP/3 visitors now pass through the tunnel as QUIC datagrams instead of inside a stream. Until now one
+  lost packet in the tunnel held up all the following ones; the visitor took that for congestion, and above all the
+  upload (e.g. in a speed test) collapsed. Now every packet travels on its own and the visitor retransmits by itself –
+  like on the normal internet. Needs CDN64 servers from cdn64-edge 0.21.0; with older servers, over the TCP fallback
+  and for oversized packets it stays with the stream. Larger queue for HTTP/3 visitors in the node.
+
+## 1.49.0 – 2026-11-06
+
+### New
+- API: everything the interface can do now also works via the local API – Docker sync settings
+  (`PUT /api/cdn64/docker`), lift an automatic block and allow the address in one call (`POST /api/cdn64/release`),
+  add names to DNS64 (`POST /api/cdn64/hosts/{id}/localdns`), CDN64 statistics and WAF/JA4 protection per host
+  (`GET /api/cdn64/protection`, `PUT /api/cdn64/hosts/{id}/protection`), CDN64 servers and connections per host or tunnel
+  (`GET`/`PUT /api/cdn64/hosts/{id}/servers`, `/api/cdn64/online/servers`).
+- API: certificate when creating a host also self-signed or from your own CA (`source` self or ca with `ca_id`),
+  accept the Let's Encrypt terms in the same call (`accept_tos`).
+
+### Fixed
+- API: `PUT /api/cdn64/blocklists` with only the allow list no longer switches off the enabled blocklists; missing
+  fields stay unchanged.
+
+## 1.48.1 – 2026-11-05
+
+### Fixed
+- CDN64: the button for servers and connections in the CDN64 column now opens its dialog in the Status pages and
+  Redirects tabs too (so far only under Proxy hosts) and returns to that tab after saving.
+
+## 1.48.0 – 2026-11-03
+
+### New
+- CDN64: servers and connections per proxy host instead of per tunnel (Business and Company): the button in the CDN64
+  column belongs to the row and chooses how many CDN64 servers this host runs over with all its names and how many
+  connections per server – e.g. host A 1×1, host B 4×4. The DNS of a name lists only its servers. The tunnel of the
+  node connects to the servers of all its hosts, per server with the highest value of the hosts there; changed
+  connections are added or dropped without disconnecting the others. The row shows only the servers of its host (the
+  spinner too). Names in mode 3 (set up on ipv64.net) choose the number of their servers here.
+- CDN64: new hosts of a node get servers its other hosts already use first (fewer connections).
+- CDN64: load balancing moves single names instead of the whole tunnel; the log names start and end.
+
+### Note
+- Needs the portal with “servers per name”; with an older portal the button keeps choosing per tunnel.
+
+## 1.47.0 – 2026-11-02
+
+### New
+- Own logo (light and dark) in the menu, dashboard and page headers; shorter hint texts.
+- CDN64: button in the CDN64 column (Business and Company): a dialog chooses how many CDN64 servers the tunnel of this
+  node uses with all its names (Business 1–2, Company 1 to all – the list grows with the servers, plus “all, including
+  future ones”) and how many connections per server (Business 1–2, Company 1–4). Free (1×1) and Supporter (2×1) are
+  fixed. The node only connects to the servers of its tunnel; changed connections are added or dropped without
+  disconnecting the others. Needs the portal with “servers per tunnel”.
+- CDN64: more connections per server are up within seconds: if a server rejects an additional connection because it
+  does not know the new limit yet, the node retries after 15 seconds instead of 2–5 minutes.
+- CDN64: buttons show a spinner while saving and stay locked meanwhile (switch on, switch off, pause, protection,
+  servers and connections); after “servers and connections” the page reloads 3 seconds later.
+- CDN64: spinner in the CDN64 column while not all connections are up yet (servers × connections per server) – after
+  saving, switching on, a restart or a drop; the tooltip shows “x of y”. The page then checks every 2.5 seconds and
+  only updates this display. A server that has not been fully connected for more than a minute stops spinning; a server
+  that ipv64 reports as down is not counted at all (the node keeps connecting to it to notice its return).
+- CDN64: a failover is visible – the PROXY64 dashboard card shows “CDN64 failover srv08 → srv09” in yellow (or “CDN64
+  server not reachable” while no stand-in has taken over yet), the CDN64 column the badge “srv08 → srv09” and at the
+  stand-in “stands in for srv08”. The log names failure, stand-in and return with the server names.
+- CDN64: load balancing of the servers (emergency brake against overload, decided by ipv64): when ipv64 moves the
+  tunnel to a less loaded server, the new one is added and the old one is dropped only once the tunnel is up there.
+  The log names start and end of the move with both server names.
+- Texts name the CDN64 servers generally instead of srv07/srv08.
+
+## 1.46.1 – 2026-11-02
+
+### Changed
+- CDN64: When the list of servers changes (servers per account, stand-in during a longer outage, return), new servers
+  join the tunnel and removed ones are dropped – connections to the remaining servers keep running without
+  interruption. Before, the tunnel to all servers restarted.
+
+## 1.46.0 – 2026-10-30
+
+### New
+- Request log with log level debug (under Settings, for all modules or only PROXY64): everything is then logged
+  without throttling – every request even without the host's request log, every rejection without the 10-second
+  brake per address, plus requests for unknown names, failed TLS handshakes, connections without valid TLS,
+  passed-through TLS and stream connections (TCP with data and duration, UDP per new session). These additions are
+  only in the log and do not change the numbers. The log page shows when debug is on.
+
+## 1.45.1 – 2026-10-30
+
+### Fixed
+- IPv4-mapped networks (`::ffff:203.0.113.0/120`) in the block and allow list, access lists and trusted proxies now
+  apply to the IPv4 addresses (before they never matched). Also for the ipv64 blocklists.
+- Block and allow list reject addresses with a zone (`fe80::1%eth0`); otherwise the portal refused the whole list
+  and no block reached the CDN64 servers.
+- Honeypot blocks cover the whole IPv6 /64 (like the blocks of the DoS protection); changing the address inside the
+  own network no longer gets around them. Existing blocks are taken over.
+- DoS protection: when the address table is full (e.g. a flood from many IPv6 networks), new addresses are counted
+  coarser (IPv6 per /48, IPv4 per /24) and finally together instead of passing without a limit.
+- "Never limit the home network" and honeypot blocks: devices in the home network that come with their global IPv6
+  address (same /64 as Node64) now count as home network.
+- X-Forwarded-For from trusted proxies: entries with port or brackets (`[2001:db8::1]:51234`) are recognised; before,
+  the proxy's address counted as the client.
+- Link-local client addresses with a zone now match networks (access lists, limits).
+- Redirect to HTTPS with an IPv6 address in the Host header gives a valid URL.
+- Docker: containers in IPv6-only networks are reachable via the IPv6 gateway.
+- CDN64 tunnel: pending HTTP/3 handshakes (mode 1) are limited per /64 for IPv6 instead of per address; a single
+  network can no longer take all slots.
+
+## 1.45.0 – 2026-10-30
+
+### New
+- The block list also applies on the CDN64 servers: the node sends block and allow list for its tunnel to ipv64 (on
+  every change, the first 1000 entries of each list). The servers reject these addresses for all names in modes 1
+  and 2 right at connection setup, also at the port mappings and for open connections; the allow list takes
+  precedence. Needs the current ipv64 portal and the current CDN64 servers.
+
+## 1.44.0 – 2026-10-30
+
+### New
+- "Security" tab: ipv64 blocklists, DoS protection and Honeypot64 are now there.
+- "Access lists" tab with an allow list (whitelist, formerly the blocklist "exceptions") and your own block list
+  (blacklist): addresses or networks rejected for all proxy hosts, "TLS pass-through" and streams, locally and via
+  CDN64; the allow list takes precedence. Below it the automatic blocks by the honeypot and the DoS protection with
+  "Unblock" and "Allow" (lifts the block and adds the address to the allow list). The access lists per host stay
+  below. API: `deny` in `/api/cdn64/blocklists`.
+
+## 1.43.0 – 2026-10-29
+
+### New
+- Bandwidth for "TLS pass-through" too: download and upload at most this many Mbit/s, empty = unlimited. The connection
+  stays encrypted and is only passed on more slowly, locally and via CDN64. Badge in the list.
+
+## 1.42.0 – 2026-10-29
+
+### New
+- Bandwidth per stream: download and upload at most this many Mbit/s (MB/s next to it), empty = unlimited (default).
+  All connections of the stream share the limit; TCP is slowed down, UDP packets wait in the port buffer. Applies
+  locally and via the CDN64 port mapper, changing it does not restart the stream. Badge in the list, API
+  `bw_down_mbit` / `bw_up_mbit`.
+
+## 1.41.0 – 2026-10-29
+
+### New
+- Bandwidth per proxy host (Advanced): download and upload at most this many Mbit/s (MB/s shown next to it), empty =
+  unlimited (default). All visitors of the host share the limit; above it traffic is slowed down and queued, nothing is
+  cut off. Also applies to WebSockets and via CDN64. A badge in the list shows the limit. API: `advanced.bw_down_mbit` /
+  `bw_up_mbit`.
+
+## 1.40.1 – 2026-10-29
+
+### Changed
+- Streams: one table instead of two – each name for streams only is a row with its CDN64 state (mode, servers, test,
+  pause, switch off) above its ports, "+ Port" adds a stream with the name already set. Streams without an own name
+  follow below. The separate page "Names for streams" is gone.
+
+## 1.40.0 – 2026-10-29
+
+### New
+- Names for streams only: under Streams → "Names for streams" you add a name without a target, switch it on at CDN64
+  (mode 1 only) and pick it in the stream. A TCP/UDP port then goes to the internet via srv07/srv08 without a proxy host
+  answering under the name: on ports 80 and 443 the node closes connections through the tunnel at once, there is no
+  route here. New host kind `stream` in the API.
+
+## 1.39.0 – 2026-10-28
+
+### Fixed
+- Locations: paths like `//admin`, `/./admin` or `/x/../admin` no longer bypass a location's access list (dot segments
+  are rejected with 400).
+- The login page also works on locations; credentials never reach the target, the session cookie no target of the host;
+  other cookies stay unchanged.
+- `CF-Connecting-IP` is only honoured from Cloudflare addresses, `X-Forwarded-For` is read across all header lines.
+- Protected content no longer gets `Cache-Control: public`; with user pass-through nothing is cached.
+- Access lists: "name:password" for an existing user changes the password; failed sign-ins count per /64 for IPv6,
+  expired blocks are cleaned up.
+- Target slot limit: only real WebSockets on allowed paths are exempt.
+- CDN64: tunnel connections are only valid for the published name (other host, absolute URL or different SNI → 421);
+  HTTP/3 through the tunnel counts toward connection limits only after the handshake.
+- CDN64 tunnel: a parallel connection rejected by the server is retried after 2–5 minutes.
+- Streams: if a port is busy only that protocol is retried, running connections stay up.
+- Port mapper: a failed removal at ipv64 no longer creates a duplicate mapping; concurrent setup no longer starts a
+  second tunnel.
+- Honeypot API: a rejected value leaves the active settings unchanged.
+
+## 1.38.3 – 2026-10-28
+
+### Changed
+- Traefik labels: middlewares may be defined on another container, as with Traefik (e.g. `authentik@docker` on the
+  authentik container). Middlewares from a file with a clearly harmless name (redirect, headers, HSTS, compression …)
+  are skipped instead of switching the host off; the Docker tab lists them ("Skipped").
+
+## 1.38.2 – 2026-10-28
+
+### Fixed
+- Docker/Traefik labels: if the labels ask for protection PROXY64 cannot map (access list missing, middleware from a
+  file, basicAuth, ipAllowList, chain …), a new host is created switched off instead of unprotected online – with a
+  hint in the Docker tab. An access list of the same name is assigned. Harmless middlewares (headers, compress,
+  redirectScheme …) are ignored; with several routers for the same host the one with the fewest unmapped middlewares
+  applies.
+- The access list from a forwardAuth middleware is now called "Traefik: <name> (<service>)": another address gives a
+  separate list, changed response headers are updated.
+- Forward auth: the callback to the auth service honours IP rules and the ban after failed attempts and reports https
+  behind a trusted proxy (e.g. Cloudflare). Responses of the service arrive uncompressed.
+- A new API key is shown directly on the page instead of via the notice (which was stored in a cookie).
+- Import: hosts lose the Docker origin of the source and become normal hosts.
+
+## 1.38.1 – 2026-10-28
+
+### Changed
+- CDN64 statistics: without blocked requests in the period, a hint explains that counting happens on the CDN64 servers
+  and the figures appear as soon as something is blocked there (the page looked empty before).
+
+## 1.38.0 – 2026-10-28
+
+### New
+- TLS per BSI TR-02102-2 (version 2026-01) per proxy host: under "Minimum" choose "TLS 1.2/1.3 per BSI TR-02102-2".
+  TLS 1.2 then only with ECDHE and AES-GCM (no CBC suites, no ChaCha20), key exchange only via P-256, P-384, P-521 and
+  the hybrid ML-KEM methods (SecP256r1MLKEM768, SecP384r1MLKEM1024, X25519MLKEM768), no plain X25519. Only deviation:
+  with TLS 1.3, Go may choose ChaCha20-Poly1305 if the device has no AES hardware or the client prefers it. Applies
+  where TLS ends on the node (not in CDN64 mode 2).
+
+## 1.37.0 – 2026-10-28
+
+### New
+- Access lists with an auth service (forward auth like Traefik): under "Sign-in" choose authentik, Authelia, oauth2-proxy
+  or an own service; usually the address is enough, response headers and callback (e.g. `/outpost.goauthentik.io/`) are
+  preset. Visitors who are not signed in land on the service's sign-in page; if it cannot be reached, PROXY64 answers
+  with 502. The host needs HTTPS (Authelia requires it); if TLS already ends at a trusted proxy in front (e.g.
+  Cloudflare), PROXY64 still reports https to the service.
+- API keys per access list for apps and scripts: as `Authorization: Bearer …`, in the `X-API-Key` header or as basic
+  auth password. PROXY64 shows a new key once and stores only its hash; the key is not passed to the target.
+- "Pass the user to the target": `Remote-User`, `Remote-Email`, `Remote-Groups` and `Remote-Name` from the auth service,
+  the list's sign-in or the API key's name. Headers of the same name sent by the visitor (and those of the auth service)
+  are always removed.
+- Docker labels: `node64.proxy.access` assigns an access list by name. With Traefik labels a middleware with
+  `forwardauth.address` automatically becomes the access list "Traefik: <name>" (preset by address); `name@file` refers to
+  a list of the same name. The router for `/outpost.goauthentik.io/` is no longer needed. If the access list comes from
+  a label, it is locked in the form.
+
+## 1.36.0 – 2026-10-28
+
+### New
+- Proxy hosts from Docker labels: containers with `node64.proxy.host` (names, comma separated), optionally with
+  `node64.proxy.port`, `node64.proxy.scheme` and `node64.proxy.network`, become proxy hosts without a form. PROXY64
+  connects to the container directly (shared Docker network, `network_mode: host` or a published port). New tab
+  **Docker** with a switch (off by default), Docker API (default like Docker monitoring, also docker-socket-proxy),
+  certificate for new Docker hosts and a list of containers with state and hints (port missing, name taken, not
+  reachable …).
+- Also read Traefik labels (for switchers, can be turned off): `Host(...)` rules of the routers, port and scheme of the
+  service and `traefik.docker.network`. Middlewares and path rules are not used.
+- "Docker" badge on such hosts. Names, scheme and target are locked in the form, deleting only works by removing the
+  label or container; everything else (CDN64 online, access list, protection, certificate …) stays configurable and is
+  kept.
+- Container removed (or label gone): the host is deleted after a 2 minute grace period and unregistered from CDN64
+  online. The grace period covers `docker compose up`. Stopped containers keep their host.
+
+## 1.35.0 – 2026-10-27
+
+### Changed
+- Overload protection: new defaults. Connections per IP 100 instead of 200, connections in total 6000 instead of
+  10000, concurrent per target 100 instead of 200. Requests per IP (50/s, briefly 500) stay, so galleries and apps that
+  send many requests at once are not slowed down. Applies to nodes without their own saved values; saved values stay.
+- Hint at "Connections in total" on which value suits which device.
+
+## 1.34.3 – 2026-10-27
+
+### Changed
+- Proxy host list: the "Options" column now wraps and is narrower, for example with an access list. The healthcheck
+  badges get the freed space and wrap less often.
+- Traffic (↓/↑) without the separator dot: when the line wrapped it ended up at the start or end of a line.
+
+## 1.34.2 – 2026-10-27
+
+### Fixed
+- Proxy host list: the neighbouring columns squeezed domains and target to one character wide, so they wrapped
+  character by character. They now keep a minimum width. So that the table fits common screen widths (around
+  1440 pixels) without scrolling sideways, the healthcheck badges, the CDN64 details, the traffic (↓/↑) and the buttons
+  at the end of the row may wrap to a second line.
+
+## 1.34.1 – 2026-10-27
+
+### Changed
+- Business plan with CDN64: 2 parallel tunnel connections per server instead of 4 and 10 TB CDN traffic per month
+  instead of 20 TB. Company stays at 4 connections and 20 TB. The values come from ipv64.net (portal SQL
+  `business_cdn_limits.sql`); the node adjusts the number of connections at the next sync by itself. The built-in
+  fallback of the plan overview matches.
+
+## 1.34.0 – 2026-10-27
+
+### New
+- New tab "CDN64 statistics" (only with CDN64 names in the account): what srv07/srv08 blocked for you – today, 7 or
+  30 days.
+  - Four figures: blocked, blocked IP addresses, overload stopped and connection hidden (of which via IPv4).
+  - Chart "Blocked per day" by reason: blocklists, access list, overload, WAF patterns, attack tool (JA4).
+  - Table per name with mode, WAF and JA4 level; a click opens the host.
+  - Top attack tools from the Honeypot64 database of ipv64.net and the box "Without CDN64".
+- Proxy hosts: the switch "Protection on the servers" (shield next to pause) sets the WAF patterns (mode 2/3) and the
+  attack tools (JA4: off, count only, block) per host. It appears as soon as ipv64.net knows the protection.
+
+## 1.33.1 – 2026-10-27
+
+### Fixed
+- v64 Blocklist: after restarting several nodes of the same account, the list showed "HTTP 429". The list token
+  applies to the whole account, and ipv64.net allowed the same file only once every 5 minutes per token.
+  - The portal dropped that limit. At most 60 fetches per 5 minutes and token still apply.
+  - On a 429, PROXY64 keeps the current list and shows no error. Only without a list does it load the daily list.
+
+## 1.33.0 – 2026-10-27
+
+### New
+- Instant block from the honeypot: blocked IPs are now also stored in the database and survive a restart (before, only
+  in memory). "Unblock" removes the entry there too.
+- The instant block can also be switched on in the honeypot ("Block detected attackers in PROXY64", on by default
+  there). Access lists → Honeypot64 then shows "Switched on by Honeypot64"; the own switch remains for blocking
+  without that option.
+
+## 1.32.2 – 2026-10-27
+
+### Changed
+- Access lists: the card "Overload protection" is now called "DoS protection (denial of service) – overload
+  protection".
+
+## 1.32.1 – 2026-10-27
+
+### Changed
+- ipv64 blocklists: the v64 Blocklist is now listed at the top right after the combined list instead of at the end.
+
+## 1.32.0 – 2026-10-27
+
+### New
+- v64 Blocklist live without manual steps: if no list token is entered by hand, PROXY64 fetches it itself with the
+  central ipv64 API key (only when the "ipv64 Honeypot" list is enabled). Entitled accounts (contributors and all plans
+  except Standard) automatically get the live version, others the daily list; when the plan changes, the version
+  switches by itself with the next fetch. A token entered by hand still takes precedence.
+
+## 1.31.1 – 2026-10-27
+
+### Changed
+- ipv64 blocklists: the v64 Blocklist is now a single list (ipv64.net no longer provides the sub-lists SSH, web,
+  mail, RDP, scanner and research scanner). If a sub-list was enabled, the v64 Blocklist applies now – no gap in
+  protection.
+
+## 1.31.0 – 2026-10-26
+
+### New
+- Maintenance mode per proxy host ("Maintenance" tab, button in the list): the name stays reachable, visitors see a
+  maintenance page instead of the target – terminal in Matrix style (default), plain with a gear (light/dark) or own
+  HTML (up to 64 KB, preview). Response 503 with Retry-After, never cached; counts neither as rejected nor as error,
+  "maintenance mode" in the access log. Also via CDN64 mode 1 and 2, not for mode 3.
+- Traffic split by direction (visitor's view): download (target to visitor) and upload (visitor to target, e.g.
+  uploaded files), each as it goes over the wire; WebSockets in both directions. Two tiles at the top, "↓ … · ↑ …"
+  per host, two lines in the chart, also split on the access page and in the start page card. Upload is counted from
+  this version on (older hours download only).
+
+- Access lists with a login page (switch "Login page instead of browser dialog"): visitors sign in on a page in the
+  style of Node64 (light/dark, German/English by browser); a signed cookie then keeps the session (12 hours, 30 days
+  with "stay signed in"). A new password ends existing sessions, the cookie never reaches the target, failed attempts
+  count as before (block, honeypot report). Basic Auth stays possible for programs; sign out via /.node64/logout
+  (button). If the host has a certificate, signing in always moves from HTTP to HTTPS; an unknown user takes as long
+  as a wrong password.
+
+### Changed
+- WebSockets count as answered (101) in the statistics instead of aborted (4xx).
+
+
+## 1.30.3 – 2026-10-26
+
+### Changed
+- Phone: the host list, "Other names in CDN64" and the access log show one card per entry (label left, content right)
+  instead of a wide table that needs scrolling sideways.
+
+
+## 1.30.2 – 2026-10-26
+
+### Fixed
+- “Add to local DNS64”: wildcards (*.example.com) and main domains (example.com) are no longer added – DNS64 would
+  have hidden mail, TXT and other records there at home. The IPv4 field only takes IPv4, the IPv6 field only IPv6;
+  loopback and link-local addresses are rejected (and no longer suggested). Switched-off DNS64 records do not count as
+  present, and an identical existing record is skipped instead of aborting with an error. Reverse lookups of the proxy
+  address stay unchanged (record without PTR).
+- The names column of the host list no longer wraps letter by letter.
+
+
+## 1.30.1 – 2026-10-26
+
+### Fixed
+- The tiles “CDN domains” and “CDN traffic” only appear below the proxy hosts, no longer below redirections, 404 hosts,
+  status pages and streams.
+
+## 1.30.0 – 2026-10-26
+
+### New
+- Host list (proxies): button “Add to local DNS64” (house icon). Adds the names of the host as custom DNS records in
+  DNS64 (no zone) – A and optionally AAAA pointing to the reverse proxy. Suggested is the address Node64 is opened
+  with, otherwise the node's LAN address. Existing records of the same type and CNAMEs stay unchanged; a green house
+  shows that all names are already local. Only while DNS64 is running.
+- Dialog “Enable CDN64”: modes 1, 2 and 3 are explained briefly at the top, each with a sketch; clicking a box selects
+  the mode. Mode 3 runs without Node64 and links to ipv64.net/cdn64.
+
+## 1.29.0 – 2026-10-26
+
+### Changed
+- Statistics: “errors” are only real errors now – 5xx and “target not reachable”. 4xx answers of the target (not found,
+  not logged in; e.g. missing icons with Bitwarden) are shown separately in grey, requests rejected by PROXY64 only
+  count as “rejected” and no longer also as 4xx. Applies to the host table, the key figures and the chart (also on the
+  dashboard). Older hours still contain rejected requests in 4xx.
+- Access lists page: the Honeypot64 card sits on the right below “Overload protection” (more compact).
+
+### Added
+- “To honeypot”: requests that got the Honeypot64 decoy instead of a rejection (unknown names and those recognised as
+  malicious) are counted on their own – per host in the table, as a key figure, in the chart (purple) and in the access
+  log (marker and filter). Visible while the decoy is active or there were diversions in the period.
+
+## 1.28.0 – 2026-10-25
+
+### Added
+- Honeypot: requests recognised as malicious can get the Honeypot64 decoy instead of 403 – one switch per kind under
+  Access lists → Honeypot64: IPs on the ipv64 blocklists, attackers reported by the honeypot, exploit patterns, AI bots/scanners
+  (all on by default) and country block (off by default). Overload (rate limits) never goes to the decoy. Only while the
+  decoy is active and only for HTTP(S); TCP/UDP streams and TLS passthrough still reject.
+- If Honeypot64 runs with the “Only via PROXY64” preset, the decoy is switched on automatically.
+
+### Changed
+- Blocked IPs (blocklists, honeypot block) are no longer cut off before TLS at the web entrance when their route to the
+  decoy is on – the request gets the decoy instead. Passthrough hosts now check the blocks themselves after the first
+  TLS packet.
+
+## 1.27.2 – 2026-10-24
+
+### Fixed
+- Host form: after an error in the form (e.g. an invalid name or the missing terms checkbox) the chosen way to the new
+  certificate stays selected instead of jumping back to “automatic”.
+
+## 1.27.1 – 2026-10-24
+
+### Changed
+- Host form, “Request a new certificate right away”: the way to the certificate now offers all ways like under
+  certificates – automatic, ipv64 DNS-01, HTTP-01, other DNS provider (per account), own CA (per CA) and self-signed.
+  Unavailable ways are greyed out with the reason (no API key, no DNS account, no CA); alias via ipv64 points to
+  certificates → new. Own CA and self-signed need no Let's Encrypt account – the checkbox for the terms only appears for
+  the Let's Encrypt ways.
+
+## 1.27.0 – 2026-10-24
+
+### New
+- Docker bridge network: PROXY64 checks whether the HTTP and HTTPS ports (80/443) are published on the Docker host – a
+  probe request via the gateway must reach its own entry point; another program on the host does not count. If a port
+  is missing, the host list shows a clear warning with a ready-to-copy `-p …`; *Settings → Ports* shows “not
+  published” or “published on the host” plus an example for `docker run` and `docker compose`. Previously the check
+  reported “listening” as soon as the port was open inside the container, even if nothing arrived from outside.
+
+## 1.26.1 – 2026-10-24
+
+### Fixed
+- Proxy host with "request a new certificate" without a Let's Encrypt account: the host used to be saved and the
+  certificate then failed because the terms of service were not accepted. The form now shows the terms checkbox (with
+  link); without it the host is not saved and the form shows the hint.
+
+## 1.26.0 – 2026-10-23
+
+### New
+- CDN64 for Business and Company: several parallel tunnel connections per server (4 instead of 1, over QUIC, QUIC on
+  443 or TLS, whatever gets through). srv07/srv08 hand new visitors to the least loaded connection; if one fails or
+  stalls, visitors carry on over the others. In the load test the single connection per server capped at about
+  650–830 Mbit/s. The number comes from ipv64 per plan; when the plan changes, the node rebuilds the connections on its
+  own. The host list shows "×4" on a server when several connections are up.
+- Account plans: new row "Parallel tunnel connections per server".
+- Requires cdn64-edge 0.18.0 on the servers (older servers keep using one connection).
+
+## 1.25.1 – 2026-10-23
+
+### Changed
+- Proxy hosts: the per-host numbers in the table follow the period of the traffic card (24 hours, 7 days, 30 days) –
+  requests, newly the traffic, errors (4xx/5xx) and rejected. Previously the column showed requests of the last 24
+  hours but errors and rejected since the module started. Column header and key figures name the selected period.
+
+## 1.25.0 – 2026-10-22
+
+### Added
+- Per host "Reject AI bots (user agent)" with "Also block fetches on behalf of users" (on by default) and "Serve
+  robots.txt that blocks AI bots" (only if the target has none). Based on the ipv64.net list "v64 AI Bots (User-Agent)"
+  (mirror of ai.robots.txt). Rejected AI bots get 403 and show up as "AI bot" in statistics and the access log.
+- The blocklist "v64 AI Bots (IP)" (official networks of OpenAI, Perplexity, Common Crawl, Mistral, Google-Agent) can
+  be selected.
+
+## 1.24.1 – 2026-10-21
+
+### Fixed
+- Port mappings via CDN64: at most 1024 UDP sessions and 4096 TCP connections per stream from the tunnel (as on the
+  stream's own port). Before, any number of UDP sessions was possible from the tunnel (the servers allow up to 4096
+  per port and server).
+
+## 1.24.0 – 2026-10-21
+
+### New
+- Port mappings for CDN64 mode 1/2: a stream can be reached from the internet via a CDN64 name of the node (option
+  "Reachable from the internet via CDN64" on the stream). srv07/srv08 open a port and pass TCP or UDP through the
+  encrypted tunnel to the stream. No port has to be open at home and your own address stays hidden. Block lists,
+  per-IP limits and the country block apply to the real visitor address, so does the stream's TLS termination. The
+  server port is shown in the stream list and in the host row; it counts towards the port mapping quota. Pause and
+  the allow/block list of the name apply to these ports as well.
+- Requires cdn64-edge 0.15.0 on the servers.
+
+## 1.23.2 – 2026-10-21
+
+### Changed
+- When a mode 3 name is shown in the row of its host, the row now also lists the port mappings (server port → target
+  port) and the allow/block list.
+
+## 1.23.1 – 2026-10-21
+
+### Changed
+- Paused CDN64 names are highlighted in yellow in the host list and in "More names in CDN64".
+- A name in mode 3 (on ipv64.net) or from another node that has a host here is now shown in the row of that host:
+  mode, status, cache, traffic, pause and an edit link. Switching on and changing the mode are no longer offered
+  there. The "More names in CDN64" card only lists names without a host here.
+
+## 1.23.0 – 2026-10-21
+
+### New
+- Pause CDN64 (all modes): one click in the host list and srv07/srv08 stop accepting anything for the name. The
+  servers close open connections within seconds. Meant as quick self-protection, for example during an attack. The
+  tunnel stays connected and DNS keeps pointing to the servers, so your own address stays hidden. Settings and
+  statistics are kept. Resume with the same button.
+- "More names in CDN64": names of the account that this node does not manage are listed below the hosts. These are
+  names in mode 3 (set up on ipv64.net, the servers go to the target directly) or names in mode 1/2 via another
+  node. Shown: target, server cache, allow/block list, port mappings, status and traffic this month. You can pause
+  them here; edit them on ipv64.net or in the other node.
+- The node now fetches the state even without CDN64 names of its own. Without any names in the account it does so
+  every 5 minutes, and right away when the list is opened.
+
+## 1.22.0 – 2026-10-21
+
+### Fixed
+- Asset cache: aborted or failed upstream responses are never cached, including compressed ones and over HTTP/3 or the
+  CDN64 tunnel.
+- Cache variants follow the encodings the browser actually accepts (q=0 does not count). Responses the target
+  compressed itself (e.g. deflate) are not served to browsers that can't decode them.
+- 103 Early Hints from the target no longer prevent compression and caching. Accept-Ranges is removed from compressed
+  responses.
+- Compression uses much less memory (smaller windows, about 3–6 MB instead of up to 50 MB per response). The stronger
+  level only applies to responses that are actually cached, and at most 2–4 such runs happen at once.
+- X-Forwarded-For and X-Real-IP can no longer be set or removed under "Advanced" (the real client address stays
+  reliable). Passthrough to the node's own web interface is refused.
+- Import: status-page hosts without a page mapping in the export (older exports or Healthchecks off on the source) are
+  created switched off and reported.
+- Statistics: totals and timeline cover the same hours (exactly N hours including the current one).
+- Quota: tiles and dashboard card share the same bar values and colours.
+
+## 1.21.4 – 2026-10-21
+
+### Fixed
+- Export/import: hosts of the kind "status page" point to the page with the same slug on the target node after the
+  import (the page ID is only valid on the source). If the page is missing there, the host is created switched off.
+- Resetting the node removes the CDN64 online names and the tunnel at ipv64 even when PROXY64 is switched off, so
+  nothing is left behind online.
+- "24 h" (page, dashboard card, Prometheus) only counts the full hourly buckets of the last 24 hours instead of up to
+  25 hours.
+- Quota tiles on the PROXY64 page: the bar stays visible with small usage (at least 1 %), domains without a quota in
+  the plan count as full.
+
+## 1.21.3 – 2026-10-21
+
+### Fixed
+- Configuration export/import now also contains the honeypot switches (decoy, access to the log sensor, instant
+  block with duration); they apply right after the import. The block list itself stays on the node.
+- Port overview (Settings › Ports): streams report why a port is not open (e.g. "address already in use"); the CDN64 online tunnel appears as an outgoing connection (server, port, connected, last error).
+
+## 1.21.2 – 2026-10-21
+
+### Changed
+- Start page card: when CDN64 online is used, CDN domains and CDN traffic this month as "x / y" with a bar (green,
+  yellow from 80 %, red when full) and a note until when the traffic lasts at the same usage.
+
+## 1.21.1 – 2026-10-21
+
+### Changed
+- CDN quota below the host list as two tiles with progress bars (domains with bandwidth, traffic this month) and a
+  forecast: at the same usage, whether the traffic lasts until the end of the month, otherwise until when.
+
+## 1.21.0 – 2026-10-21
+
+### New
+- Compression with zstd and Brotli in addition to gzip, chosen by the browser (dynamic zstd → Brotli → gzip, static
+  files in the cache Brotli → zstd → gzip at a stronger level). On by default for new proxy hosts.
+
+### Changed
+- The cache now sits behind the compression and serves the compressed variant; the switch is called "Compress
+  responses". Strong ETags become weak when compressing, `Cache-Control: no-transform` is respected.
+
+## 1.20.1 – 2026-10-20
+
+### Changed
+- Honeypot64: the switch "Unknown requests to the honeypot" now says that the node then answers unknown requests
+  visibly (login page, fallback certificate) – highlighted when the default page is set to "close connection". In the
+  settings (ports) the default page points out that the decoy replaces it while it is active.
+
+## 1.20.0 – 2026-10-20
+
+### New
+- Working together with Honeypot64 (card "Honeypot64" under access lists, three switches, all off by default, only
+  with the Honeypot64 module running):
+  - Unknown requests to the honeypot: requests without a matching host (IP only, foreign domain, unknown name) go to
+    the web decoy instead of the default page.
+  - Hand accesses to the honeypot: per request only metadata (IP, host, method, path without query, status, failed
+    login) goes to the log sensor, never content.
+  - Block attackers from the honeypot immediately: reported IPs are blocked for all hosts and streams (duration
+    adjustable, default 24 h), never private addresses, blocklist exceptions or the hosts' proxies. List with reason
+    and end, each entry can be lifted.
+- API `GET/PUT /api/cdn64/honeypot`, `DELETE /api/cdn64/honeypot/blocks/{ip}`; Prometheus `node64_cdn64_honeypot_*`.
+
+## 1.19.1 – 2026-10-20
+
+### Fixed
+- Country filter "allow only": while the list of one of the allowed countries is not loaded yet (e.g. right after
+  start or when a download fails), nobody is blocked – before, visitors from that allowed country were rejected.
+
+## 1.19.0 – 2026-10-20
+
+### New
+- ipv64 blocklists: the lists of the ipv64 honeypots (v64 blocklist and the partial lists SSH, web, mail, RDP,
+  scanners, research scanners) appear marked "ipv64 Honeypot" as soon as ipv64 offers them in `index.json`.
+- List token for live lists: the blocklist card lets you store, change and delete the list token from your ipv64
+  account. With it, PROXY64 loads the honeypot lists in their live version (re-scored every 30 minutes), without it
+  the daily version. Each list shows which version is loaded; if the token is not entitled it reads "daily version –
+  token without entitlement", if it is rejected (401/403/404) PROXY64 loads the daily version and shows the error.
+- The token is stored encrypted and never shown, logged or exported. API: `GET /api/cdn64/blocklists` returns
+  `token_set` and, per list, `edition`, `live_denied`, `live_error`; `PUT` takes `token` (empty = delete).
+
+## 1.18.1 – 2026-10-20
+
+### Fixed
+- Country block: a country list needed by a new host exactly while lists were loading could be missing until the next
+  refresh.
+
+## 1.18.0 – 2026-10-20
+
+### New
+- New host type "status page" (tab Status pages): your own domain shows a Healthchecks status page directly at "/",
+  with central certificate, force SSL, HSTS and HTTP/3.
+- As with proxy hosts, blocklists, country block, limits, exploit block and access list apply in front of the page,
+  plus statistics and access log. Via CDN64 it can be switched on like a proxy host in mode 1 or 2.
+- Export and import keep the assignment. If the page does not exist on the target node, the host answers 404 (503
+  without Healthchecks) until a page is chosen.
+
+## 1.17.1 – 2026-10-19
+
+### New
+- Proxy hosts with CDN64: a small icon shows how the node is connected to the servers srv07/srv08 – a lightning bolt
+  for QUIC (filled: own port, outlined: via port 443), a lock for the HTTPS fallback (TLS over TCP), a plug when no
+  server is connected. The tooltip names the path per server (e.g. “srv07: QUIC · srv08: HTTPS”); the self-test in
+  the CDN64 dialog shows it as well. The API returns it per server as `via` (`quic`, `quic443`, `tls`).
+
+## 1.17.0 – 2026-10-19
+
+### Changed
+- New name: the local reverse proxy is now called **PROXY64** (menu, pages, dashboard, ports, audit, backup).
+  **CDN64** now only means publishing through the servers srv07/srv08 (modes 1, 2, 3); “CDN64 online” becomes
+  “CDN64” (column, dialog, notifications, audit). Addresses, API, settings, export and Prometheus names stay the same.
+- Logo: until the PROXY64 logo is available, the module icon takes its place.
+
+## 1.16.0 – 2026-10-19
+
+### New
+- Proxy hosts: icons show the overload protection – a gauge when the local rate limits apply to the host (click leads
+  to the settings), a green shield when the host runs through CDN64 online and is therefore also protected on the
+  servers (blocklist, limits per IP, fair throttling).
+
+## 1.15.0 – 2026-10-19
+
+### New
+- Country block for streams too (TCP and UDP): block countries or allow only certain ones, as for hosts. A change
+  applies immediately without restarting the stream; for UDP the first packet of a client decides.
+
+## 1.14.0 – 2026-10-19
+
+### New
+- Country block per host (proxy, redirect, TLS passthrough): block visitors from certain countries or allow only
+  certain countries. The country lists come from ipv64.net daily and are loaded and cached only for countries in
+  use. Private networks, CGNAT and the blocklist exceptions are never blocked; behind Cloudflare or similar the real
+  client IP counts. Rejected visitors show up in statistics and access log as "country block".
+- Blocklists: the selection now comes from `index.json` on ipv64.net. New lists appear without a Node64 update, e.g.
+  all lists without Tor, abuse.ch Feodo Tracker, ET Compromised, CINS Army, IPsum, Tor (all relays) and the networks
+  of AWS, Google Cloud and Cloudflare. Each list shows its license and description.
+
+### Changed
+- "IPv64 Gesamtliste" (all lists) is no longer marked as recommended because it contains Tor; the combined list
+  without Tor is now recommended.
+
+## 1.13.1 – 2026-10-19
+
+### New
+- Help links: a question mark on pages and cards opens the matching place in the documentation on node64.de (proxy
+  hosts, options, access lists, blocklists, rate limits, default page, statistics, TLS passthrough, CDN64 online).
+
+## 1.13.0 – 2026-10-19
+
+### New
+- Prometheus (`/api/metrics`): per host requests, errors and rejected requests since start and for the last 24
+  hours (by status class, bytes), target reachability and response time; CDN64 online with the names switched on,
+  tunnel per server (connected, round trip time, streams), state and traffic per name at ipv64, and the quota.
+- Reset node: CDN64 online names and the tunnel are removed at ipv64 first.
+- Complete configuration export: access lists (with users), blocklists, exceptions, limits and access log
+  settings are included; after the import hosts and locations point to the lists of the new node, fixed
+  certificates are found again by their names. Existing settings are kept.
+
+## 1.12.0 – 2026-10-19
+
+### New
+- Dashboard card: requests, traffic, 5xx errors (with share) and rejected requests of the last 24 hours, plus active TCP streams.
+
+### Fixed
+- Statistics: evaluations over long periods could fail with "disk I/O error" (no directory for SQLite temporary files in the container); intermediate results now stay in memory.
+- Display: CDN64 logo is light in the dark theme.
+- Audit: “Load lists now” and “Check targets now” (UI and API) are logged.
+
+## 1.11.0 – 2026-10-19
+
+CDN64 online: HTTP/3 in mode 1 too.
+
+### New
+- Mode 1 (pass-through) supports HTTP/3: srv07/srv08 read the name from the first QUIC packet and pass QUIC raw
+  through the tunnel to the node. As with TCP, TLS and HTTP/3 terminate only in the node, with the real visitor address.
+  Applies to proxy hosts with “HTTP/3” (default).
+- Responses via the tunnel carry the HTTP/3 hint (Alt-Svc) as soon as all connected servers support
+  pass-through.
+
+### Changed
+- Mode 3 (directly to the target, without tunnel) is now only available on ipv64.net/cdn64; the enable dialog shows a
+  note with a link. Mode 3 names previously enabled in the node can be switched to mode 1/2 or
+  disabled.
+
+## 1.10.0 – 2026-10-18
+
+CDN64 online mode 3.
+
+### New
+- Mode 3 selectable: srv07/srv08 go directly to the proxy host's target without a tunnel (only if the target is publicly
+  reachable; otherwise mode 1 or 2). Switching between mode 3 and 1/2 disables the name at ipv64 and enables it again.
+
+## 1.9.0 – 2026-10-18
+
+CDN64 online in operation.
+
+### New
+- Per enabled host, the servers' figures for the month (traffic, requests, rejections), below them the
+  account's CDN quota.
+- Notifications via the notification channels: tunnel connected to no server for 3 minutes, reconnected, name
+  blocked at ipv64.
+- The tunnel uses port 443 if 7844 is blocked.
+
+### Changed
+- Mode 2: requests no longer count as new connections (the connection limit otherwise slowed visitors down).
+- The sync adopts modes changed elsewhere and resets mode 2 to 1 for “TLS passthrough”.
+
+## 1.8.0 – 2026-10-18
+
+CDN64 online mode 2.
+
+### New
+- Mode 2 selectable: TLS terminates on srv07/srv08 (HTTP/1.1, HTTP/2, HTTP/3), protection and request limits already apply
+  there, requests arrive at the node as HTTPS with the real visitor IP. The servers obtain certificates themselves;
+  until then traffic is passed through, so switching never causes an outage.
+- *Switch mode* button and “Mode 1/2” badge in the list; the self-test sends a real request.
+
+## 1.7.0 – 2026-10-18
+
+CDN64 online with one click.
+
+### New
+- *CDN64 online* column in the host lists: *Enable* makes a host reachable from the internet via srv07/srv08.cdn64.de
+  (IPv4 and IPv6, no open ports).
+  - Steps in the dialog: check account, register and establish tunnel, enable name at ipv64 (DNS), self-test
+    via the internet. Each step with result and error text with remedy.
+  - Mode 1 (TLS is passed through, the certificate stays in the node); optionally an online health check right away.
+  - Badges per server (connected, via the other server, no tunnel), “blocked”, self-test, enable more names,
+    disable.
+  - Disabling restores the DNS; with the last name the tunnel is deregistered. Deleted hosts and
+    removed names are removed at ipv64 by the sync (every minute).
+  - Notes on blocked UDP (tunnel over TCP) and a too-small UDP buffer on the Docker host.
+- In the home network, DNS64 answers enabled names with the node's address (split DNS).
+- API: `POST /api/cdn64/online/tunnel`, `POST|DELETE /api/cdn64/hosts/{id}/online`,
+  `POST /api/cdn64/hosts/{id}/online/test`; `GET /api/cdn64/online` additionally shows names, quota and
+  UDP buffer.
+
+## 1.6.0 – 2026-10-17
+
+Rejections in statistics and log, same chart as on the dashboard.
+
+### New
+- Every rejection is recorded: blocklists, bans, limits, access lists and exploit blocking.
+  - It always appears in the access log (*Access log* tab), with reason and filter “Rejected”, even without the access log enabled; throttled to one entry per address and reason every 10 seconds.
+  - Connections closed before the first request appear as “Connection rejected”.
+  - Overload (total connections exhausted, target saturated) and bans appear as warnings in the node's log.
+- “Rejected” tile (24 hours) on the *Access log* tab.
+
+### Changed
+- The chart in the proxy host overview and the one on the dashboard are now the same: requests and rejections stacked, traffic as a line.
+- *Access lists* tab: ipv64 blocklists and overload protection side by side, your own access lists below.
+
+## 1.5.0 – 2026-10-17
+
+Overload protection, ipv64 blocklists, traffic in the overview.
+
+### New
+- Overload protection (*Access lists* tab), as with HAProxy, enabled with default values:
+  - per IP (IPv6 per /64): 200 concurrent connections, 20 new connections per second (briefly 200),
+    50 requests per second (briefly 500, above that 429);
+  - 10,000 connections in total; per proxy host 200 concurrent requests to the target, further ones wait up to
+    10 seconds, then 503 (WebSockets do not count);
+  - anyone bouncing off 300 times within one minute is rejected at connection setup for 10 minutes; banned
+    addresses appear in the card and can be released;
+  - exempt: home network (can be turned off), the hosts' trusted proxies and the blocklist exceptions;
+    per host under *Advanced* “No per-IP limits”;
+  - also applies to TCP streams; API `/api/cdn64/limits`.
+- ipv64 blocklists via toggle, rejected before TLS; API `/api/cdn64/blocklists`.
+- *Traffic* card in the proxy host overview (requests by 2xx–5xx, data volume, 24 hours to 30 days).
+- The table shows whether a health check monitors exactly this target (local or ipv64/other node).
+
+## 1.4.1 – 2026-10-16
+
+### Changed
+- Certificates have their own menu item *Certificates* in the core and no longer belong to CDN64.
+  - The *SSL certificates* tab leads there.
+  - The old addresses under `/cdn64/certificates` and `/cdn64/dns-accounts` redirect.
+- Certificates are renewed even when CDN64 is off.
+
+## 1.4.0 – 2026-10-15
+
+Certificates with other DNS providers too, DNS records at ipv64 on creation.
+
+### New
+- DNS accounts for Let's Encrypt via DNS-01 with other providers, including wildcards:
+  - Providers: Cloudflare, Hetzner, netcup, INWX, IONOS, deSEC, Duck DNS, Porkbun, GoDaddy, DigitalOcean, Gandi, OVHcloud.
+  - The credentials are stored encrypted and never shown again; when editing, empty fields remain unchanged.
+  - An account used by a certificate cannot be deleted.
+- New method “Other DNS provider” when requesting; likewise in the host form under “Request certificate right away”.
+- DNS record at ipv64 when creating a host:
+  - CNAME (e.g. to the DynDNS domain) or A/AAAA, for every domain of the host in the ipv64 account;
+  - existing records remain unchanged;
+  - in the API via `create_dns_record`.
+
+## 1.3.0 – 2026-10-15
+
+Custom locations, access lists, advanced options, statistics and access log.
+
+### New
+- Custom locations: paths of a proxy host with their own target (e.g. /api to another service).
+  - Optionally with a different path at the target, their own WebSocket setting and their own access list.
+  - The longest matching path wins.
+- Access lists:
+  - Users with password (stored only as a bcrypt hash) and IP rules (allow/deny, first match applies, otherwise blocked).
+  - “Both required” or “one condition is enough”; the login can be passed on to the target.
+  - After 10 failed logins within 5 minutes the IP is blocked for 15 minutes; the block appears in the audit.
+  - Applies to proxy hosts, locations and redirection hosts.
+- Advanced:
+  - set or remove headers towards the target and towards the visitor;
+  - Host header (visitor's name, target's name or a fixed value);
+  - timeout to the target, upload limit (413), no buffering, gzip for text responses;
+  - trusted proxies with a Cloudflare template for the real client IP.
+- Statistics: requests per host and hour (2xx–5xx, data volume) over 90 days. The list shows the requests of the last 24 hours.
+- Access log can be enabled per host:
+  - “Access log” tab with filters by host, status and search;
+  - retention 1–90 days, client IPs optionally truncated;
+  - separate file cdn64.db.
+- “Create health check for this target” for proxy hosts, TLS passthrough and TCP streams (requires the Healthchecks module).
+- API: access lists, access log, statistics, settings, create health check.
+
+## 1.2.0 – 2026-10-15
+
+Redirection hosts, 404 hosts, streams, TLS passthrough and the default page.
+
+### New
+- Redirection hosts:
+  - domains to another domain, optionally with port and path;
+  - code 301, 302, 303, 307, 308 or 300;
+  - scheme as in the request or fixed;
+  - keep path and query;
+  - SSL options as with proxy hosts.
+- 404 hosts: domains that deliberately respond with “not found”, also via HTTPS.
+- Streams:
+  - a port (TCP and/or UDP) is passed raw to a target;
+  - for TCP optionally with TLS termination using a certificate from certificate management;
+  - ports are checked against the other parts; if one is taken, the reason is shown on the stream;
+  - counters for connections and data volume, reachability of the target.
+- TLS passthrough: a name on port 443 goes raw to a service with its own certificate, without decryption here. All other names on 443 stay with Node64.
+- Default page for unknown names: 404, close connection, redirect or a custom HTML page.
+- Export/import now also includes streams.
+
+## 1.1.0 – 2026-10-15
+
+SSL certificates tab.
+
+### New
+- List of all certificates:
+  - names, method, issuer;
+  - expiry as a pill (green, yellow from 30 days before expiry, red from 7 days) with date;
+  - used by which hosts, automatic renewal on/off;
+  - renew, download (without key), delete (certificates in use only after confirmation);
+  - the current step during retrieval; the page reloads itself meanwhile.
+- Request a certificate from Let's Encrypt:
+  - automatically (ipv64 if all names are in the account, otherwise HTTP-01) or specifically via ipv64 DNS-01 (including wildcards);
+  - alias via ipv64 for third-party domains, with a preview of the required CNAME records;
+  - via HTTP-01;
+  - staging environment selectable.
+- Upload your own certificate (file or paste).
+- Let's Encrypt account: email and acceptance of the terms of service.
+- Host form: “Request new certificate right away”; in the API via `request_certificate` when creating or changing a host.
+
+## 1.0.0 – 2026-10-15
+
+First version of the reverse proxy, modeled on Nginx Proxy Manager.
+
+### New
+- Proxy hosts with multiple domains (including wildcards) and a target via http or https, name or IP, port.
+- Options per host:
+  - WebSockets;
+  - Block Common Exploits (rules as in NPM, plus blocking of .git and .env);
+  - Cache Assets: static files in memory, at most 64 MB.
+- SSL per host:
+  - Certificate from certificate management (matched by name or chosen explicitly) or HTTP only.
+  - Force HTTPS, HSTS (including subdomains), HTTP/2, HTTP/3 (QUIC), at least TLS 1.2 or 1.3.
+- Target reachability: checked every minute, shown in the list with response time or “unreachable since …”.
+- An unreachable target gets a neutral “502” page. Loops (target points to the proxy itself) are detected.
+- Counters per host since startup: requests, errors, blocked requests.
+- Dashboard card, audit for all changes, local API under `/api/cdn64/…`.
+- Export and import of hosts.
+- When disabled, nothing runs: no routes, no checks, no cache, and the shared entry point (edge) closes its ports.

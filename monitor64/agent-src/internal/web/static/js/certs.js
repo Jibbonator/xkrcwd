@@ -1,0 +1,96 @@
+// Zertifikate (Kern): Rueckfragen, Alias-Vorschau, Felder des DNS-Anbieters, Neuladen waehrend eines Abrufs.
+// Vanilla-JS, keine externen Quellen.
+(function () {
+	"use strict";
+
+	// Rueckfrage vor Loeschen
+	document.querySelectorAll("[data-confirm]").forEach(function (b) {
+		b.addEventListener("click", function (e) {
+			if (!window.confirm(b.getAttribute("data-confirm"))) { e.preventDefault(); }
+		});
+	});
+
+	// Neues Zertifikat: Alias-Felder nur beim Alias-Weg, dazu die noetigen CNAMEs als Vorschau
+	var names = document.querySelector("[data-cert-names]");
+	var aliasBox = document.querySelector("[data-alias-box]");
+	var zone = document.querySelector("[data-alias-zone]");
+	var prefix = document.querySelector("[data-alias-prefix]");
+	var preview = document.querySelector("[data-alias-preview]");
+	var srcs = document.querySelectorAll("[data-cert-source]");
+	var dnsBox = document.querySelector("[data-dns-box]");
+	var caBox = document.querySelector("[data-ca-box]");
+	var acmeBox = document.querySelector("[data-acme-box]");
+	var selfBox = document.querySelector("[data-self-box]");
+	var keyBox = document.querySelector("[data-key-box]"); // Schluesselart: selbst signiert und Let's Encrypt (#62)
+	var aliasSync = function () {
+		var src = "";
+		srcs.forEach(function (r) { if (r.checked) { src = r.value; } });
+		if (aliasBox) { aliasBox.classList.toggle("d-none", src !== "alias"); }
+		if (dnsBox) { dnsBox.classList.toggle("d-none", src !== "dns"); }
+		if (caBox) { caBox.classList.toggle("d-none", src !== "ca"); }
+		if (acmeBox) { acmeBox.classList.toggle("d-none", src === "ca" || src === "self"); }
+		if (selfBox) { selfBox.classList.toggle("d-none", src !== "self"); }
+		if (keyBox) { keyBox.classList.toggle("d-none", src === "ca"); }
+		if (!preview || !names || !zone) { return; }
+		var z = (zone.value || "").trim().toLowerCase().replace(/\.$/, "");
+		var p = prefix ? (prefix.value || "").trim().toLowerCase().replace(/^\.+|\.+$/g, "") : "";
+		var to = "_acme-challenge." + (p ? p + "." : "") + z;
+		var out = [];
+		names.value.split(/[\s,;]+/).forEach(function (n) {
+			n = n.trim().toLowerCase().replace(/\.$/, "").replace(/^\*\./, "");
+			if (n && z) { out.push("_acme-challenge." + n + "  CNAME  " + to); }
+		});
+		preview.textContent = out.join("\n");
+		preview.style.whiteSpace = "pre-wrap";
+	};
+	srcs.forEach(function (r) { r.addEventListener("change", aliasSync); });
+	[names, zone, prefix].forEach(function (el) { if (el) { el.addEventListener("input", aliasSync); el.addEventListener("change", aliasSync); } });
+	aliasSync();
+
+	// DNS-Zugang: nur die Felder des gewaehlten Anbieters
+	var prov = document.querySelector("[data-provider-select]");
+	if (prov) {
+		var provSync = function () {
+			document.querySelectorAll("[data-provider-fields]").forEach(function (el) {
+				var on = el.getAttribute("data-provider-fields") === prov.value;
+				el.classList.toggle("d-none", !on);
+				el.querySelectorAll("input").forEach(function (i) { i.disabled = !on; });
+			});
+		};
+		prov.addEventListener("change", provSync);
+		provSync();
+	}
+
+	// PKCS#12: Fenster fuer das gewaehlte Zertifikat; nach dem Absenden schliessen und Passwort leeren
+	var p12form = document.querySelector("[data-p12-form]");
+	if (p12form) {
+		document.querySelectorAll("[data-p12]").forEach(function (b) {
+			b.addEventListener("click", function () { p12form.setAttribute("action", "/certificates/" + b.getAttribute("data-p12") + "/p12"); });
+		});
+		p12form.addEventListener("submit", function () {
+			setTimeout(function () {
+				p12form.reset();
+				var m = window.bootstrap && window.bootstrap.Modal.getInstance(document.getElementById("p12modal"));
+				if (m) { m.hide(); }
+			}, 300);
+		});
+	}
+
+	// Weitere ACME-Stelle: Vorlage fuellt Name und Verzeichnis, zeigt, wo es die EAB-Daten gibt
+	var preset = document.querySelector("[data-acme-preset]");
+	if (preset) {
+		preset.addEventListener("change", function () {
+			var o = preset.options[preset.selectedIndex];
+			if (!o.value) { return; }
+			document.querySelector("[data-acme-name]").value = o.getAttribute("data-name");
+			document.querySelector("[data-acme-directory]").value = o.getAttribute("data-directory");
+			document.querySelector("[data-acme-docs]").textContent = o.getAttribute("data-docs");
+		});
+	}
+
+	// Waehrend ein Zertifikat geholt wird: Seite alle paar Sekunden neu laden
+	var reload = document.querySelector("[data-reload]");
+	if (reload) {
+		setTimeout(function () { window.location.reload(); }, 1000 * (parseInt(reload.getAttribute("data-reload"), 10) || 5));
+	}
+})();

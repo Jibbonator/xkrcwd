@@ -1,0 +1,153 @@
+{{define "content"}}
+{{$d := .Data}}
+{{$st := $d.State}}
+<h1 class="h4 mb-3"><i class="bi bi-cloud-check text-info me-1"></i> {{.T "link.title"}}{{$.Doc "ipv64#healthchecks-sync"}}</h1>
+
+<div class="row g-3">
+<div class="col-lg-7">
+	<div class="card mb-3">
+		<div class="card-header"><i class="bi bi-activity text-info"></i> {{.T "link.status"}}{{$.Doc "ipv64#verbindungen"}}</div>
+		<div class="card-body">
+		{{if not $d.Available}}
+			<p class="text-body-secondary mb-0">{{.T "link.unavailable"}}</p>
+		{{else if $st.Linked}}
+			<div class="d-flex align-items-center gap-2 mb-2">
+				{{if $st.Connected}}<span class="badge text-bg-success"><i class="bi bi-cloud-check"></i> {{.T "link.connected"}}</span>{{else}}<span class="badge text-bg-warning"><i class="bi bi-cloud-slash"></i> {{.T "link.disconnected"}}</span>{{end}}
+				{{if $st.Hub}}<span class="text-body-secondary small">{{$st.Hub}}</span>{{end}}
+			</div>
+			<dl class="row mb-2 small">
+				<dt class="col-5">{{.T "link.account"}}</dt><dd class="col-7">#{{$st.AccountID}} · {{$st.Plan}}</dd>
+				<dt class="col-5">{{.T "link.node_name"}}</dt><dd class="col-7">{{$st.NodeName}}{{if $st.Location}} ({{$st.Location}}){{end}}</dd>
+				{{if $st.ChecksLimit}}<dt class="col-5">{{.T "link.quota"}}</dt><dd class="col-7{{if ge $st.ChecksToday $st.ChecksLimit}} text-danger{{end}}">{{.T "link.quota_value" "today" $st.ChecksToday "limit" $st.ChecksLimit}}</dd>{{end}}
+				<dt class="col-5">{{.T "link.remote_mgmt"}}</dt><dd class="col-7">{{.T (print "link.remote." $st.RemoteMgmt)}}</dd>
+				<dt class="col-5">{{.T "link.linked_at"}}</dt><dd class="col-7">{{.TimeStr $st.LinkedAt}}</dd>
+				<dt class="col-5">{{.T "link.last_sync"}}</dt><dd class="col-7">{{if $st.LastSyncAt}}{{.TimeStr $st.LastSyncAt}}{{else}}–{{end}}</dd>
+				<dt class="col-5">{{.T "link.revision"}}</dt><dd class="col-7">{{$st.Revision}}</dd>
+				<dt class="col-5">{{.T "link.outbox"}}</dt><dd class="col-7">{{$st.Outbox}}{{if $st.Conflicts}} · <span class="text-danger">{{.T "link.conflicts_n" "count" $st.Conflicts}}</span>{{end}}</dd>
+			</dl>
+			{{if $st.LastError}}<div class="alert alert-warning py-2 small mb-2">{{$st.LastError}}</div>{{end}}
+			{{if $d.Mismatch}}<div class="alert alert-warning py-2 small mb-2"><i class="bi bi-exclamation-triangle"></i> {{.T "link.key_mismatch" "key" $d.Key.ID "account" $d.Key.Account "link" $st.AccountID}} <a href="/settings#ipv64">{{.T "nav.settings"}}</a></div>{{end}}
+			<form method="post" action="/link/settings" class="mb-3">
+				<input type="hidden" name="_csrf" value="{{.CSRF}}">
+				<div class="form-check"><input class="form-check-input" type="checkbox" name="local_notifications" id="local_notifications"{{if $d.LocalNotif}} checked{{end}} data-autosubmit><label class="form-check-label" for="local_notifications">{{.T "link.local_notifications"}}</label><div class="form-text">{{.T "link.local_notifications_hint"}}</div></div>
+			</form>
+			<form method="post" action="/link/unlink">
+				<input type="hidden" name="_csrf" value="{{.CSRF}}">
+				<div class="form-check mb-1"><input class="form-check-input" type="checkbox" name="keep_checks" id="keep_checks"><label class="form-check-label" for="keep_checks">{{.T "link.keep_checks" "count" $d.Own}}</label></div>
+				<div class="form-text mb-2">{{$.T "link.scope" "own" $d.Own "other" $d.Other}}</div>
+				<button class="btn btn-outline-danger btn-sm" type="submit" data-confirm="{{.T "link.unlink_confirm"}}"><i class="bi bi-x-circle"></i> {{.T "link.unlink"}}</button>
+			</form>
+		{{else if $st.PendingCode}}
+			<p>{{.T "link.code_intro"}}</p>
+			<div class="display-6 font-monospace text-center my-3"><span id="link-code">{{slice $st.PendingCode 0 4}}-{{slice $st.PendingCode 4}}</span> <button class="btn btn-outline-secondary btn-copy align-middle" type="button" data-copy-text="{{$st.PendingCode}}" title="{{.T "common.copy"}}"><i class="bi bi-clipboard"></i></button></div>
+			<ol class="small">
+				<li>{{.T "link.step1"}} <a href="https://ipv64.net/link.php" target="_blank" rel="noopener">ipv64.net/link</a></li>
+				<li>{{.T "link.step2"}}</li>
+				<li>{{.T "link.step3"}}</li>
+			</ol>
+			<div class="d-flex align-items-center gap-2" id="link-wait"><div class="spinner-border spinner-border-sm" role="status"></div> <span>{{.T "link.waiting"}}</span></div>
+			<div class="alert alert-danger py-2 small mt-2 d-none" id="link-error"></div>
+			<form method="post" action="/link/cancel" class="mt-3"><input type="hidden" name="_csrf" value="{{.CSRF}}"><button class="btn btn-outline-secondary btn-sm">{{.T "common.cancel"}}</button></form>
+		{{else if $st.Requesting}}
+			<div class="d-flex align-items-center gap-2 my-3"><div class="spinner-border spinner-border-sm" role="status"></div> <span>{{.T "link.requesting"}}</span></div>
+			<div class="alert alert-danger py-2 small mt-2 d-none" id="link-error"></div>
+		{{else}}
+			<p>{{.T "link.intro"}}</p>
+			{{if $st.LastError}}<div class="alert alert-danger py-2 small">{{.T "link.start_failed"}}: {{$st.LastError}}<br>{{.T "link.start_failed_hint"}}</div>{{end}}
+			<ul class="small text-body-secondary">
+				<li>{{.T "link.benefit1"}}</li><li>{{.T "link.benefit2"}}</li><li>{{.T "link.benefit3"}}</li>
+			</ul>
+			<p class="small text-body-secondary">{{.T "link.privacy"}}</p>
+			{{if $d.KeyOK}}
+			<form method="post" action="/link/apikey" class="border rounded p-3 mb-3">
+				<input type="hidden" name="_csrf" value="{{.CSRF}}">
+				<div class="fw-semibold mb-1"><i class="bi bi-lightning-charge text-warning"></i> {{.T "link.key_title"}}</div>
+				<p class="small text-body-secondary mb-2">{{.T "link.key_text" "account" $d.Key.Account}}</p>
+				<div class="row g-2 mb-2">
+					<div class="col-sm-6"><label class="form-label small mb-1" for="key_location">{{.T "link.key_location"}}</label><input class="form-control form-control-sm" id="key_location" name="location" value="{{$d.Location}}" maxlength="100"></div>
+					<div class="col-sm-6"><label class="form-label small mb-1" for="key_remote">{{.T "link.remote_mgmt"}}</label><select class="form-select form-select-sm" id="key_remote" name="remote_mgmt"><option value="full" selected>{{.T "link.remote.full"}}</option><option value="read">{{.T "link.remote.read"}}</option><option value="off">{{.T "link.remote.off"}}</option></select></div>
+				</div>
+				<button class="btn btn-primary"><i class="bi bi-cloud-plus"></i> {{.T "link.key_button" "account" $d.Key.Account}}</button>
+			</form>
+			<p class="small text-body-secondary mb-2">{{.T "link.key_or"}}</p>
+			<form method="post" action="/link/start"><input type="hidden" name="_csrf" value="{{.CSRF}}"><button class="btn btn-outline-secondary btn-sm"><i class="bi bi-123"></i> {{.T "link.start"}}</button></form>
+			{{else}}
+			<form method="post" action="/link/start"><input type="hidden" name="_csrf" value="{{.CSRF}}"><button class="btn btn-primary"><i class="bi bi-cloud-plus"></i> {{.T "link.start"}}</button></form>
+			<p class="small text-body-secondary mt-2 mb-0"><i class="bi bi-lightbulb"></i> {{.T "link.key_hint"}} <a href="/settings#ipv64">{{.T "nav.settings"}}</a></p>
+			{{end}}
+		{{end}}
+		</div>
+	</div>
+</div>
+<div class="col-lg-5">
+	{{$c := $d.Cluster}}{{if $c.Available}}
+	<div class="card mb-3" id="cluster">
+		<div class="card-header"><i class="bi bi-hdd-network text-primary"></i> {{.T "cluster.title"}}{{$.Doc "cluster"}}{{if $c.Members}} <span class="badge text-bg-secondary">{{$c.Members}}</span>{{end}}</div>
+		<div class="card-body small">
+			<p class="text-body-secondary mb-2">{{.T "cluster.link_hint"}}</p>
+			<p class="mb-2" id="cluster_hc">{{.T "cluster.link_switch"}}: {{if $c.HC}}<span class="badge text-bg-success">{{.T "common.on"}}</span>{{else}}<span class="badge text-bg-secondary">{{.T "common.off"}}</span>{{end}}</p>
+			<a href="/cluster" class="btn btn-outline-primary btn-sm"><i class="bi bi-hdd-network"></i> {{.T "cluster.link_open"}}</a>
+		</div>
+	</div>
+	{{end}}
+	{{if $d.Peers}}
+	<div class="card mb-3" id="nodes">
+		<div class="card-header"><i class="bi bi-diagram-3-fill text-primary"></i> {{.T "link.peers"}} <span class="badge text-bg-secondary">{{len $d.Peers}}</span></div>
+		<ul class="list-group list-group-flush small">
+			{{range $d.Peers}}
+			<li class="list-group-item">
+				<div class="d-flex align-items-center gap-2">
+					<i class="bi bi-hdd-network {{if .Online}}text-success{{else}}text-secondary{{end}}"></i>
+					<span class="fw-semibold text-truncate">{{.Name}}</span>
+					{{if .Self}}<span class="badge text-bg-primary">{{$.T "hc.form.this_node"}}</span>{{end}}
+					<span class="ms-auto">{{if .Online}}<span class="badge text-bg-success">online</span>{{else}}<span class="badge text-bg-secondary">offline</span>{{end}}</span>
+				</div>
+				<div class="text-body-secondary">{{if .Location}}{{.Location}} · {{end}}{{$.T "link.peer_checks" "count" .Checks}}</div>
+			</li>
+			{{end}}
+		</ul>
+		<div class="card-footer small text-body-secondary py-2">{{.T "link.peers_hint"}}</div>
+	</div>
+	{{end}}
+	<div class="card mb-3">
+		<div class="card-header"><i class="bi bi-hdd-rack text-primary"></i> {{.T "link.endpoints"}}{{$.Doc "ipv64#ausfallverhalten"}}</div>
+		<ul class="list-group list-group-flush small">
+			{{range $st.Endpoints}}<li class="list-group-item d-flex justify-content-between"><span>{{.Name}} <span class="text-body-secondary">({{.Location}})</span></span><code>{{.URL}}</code></li>{{end}}
+		</ul>
+	</div>
+</div>
+</div>
+
+{{if $d.Conflicts}}
+<h2 class="h5 mt-2">{{.T "link.conflicts"}}</h2>
+<p class="small text-body-secondary">{{.T "link.conflicts_hint"}}</p>
+{{range $d.Conflicts}}
+<div class="card mb-3">
+	<div class="card-header d-flex justify-content-between align-items-center">
+		<span><strong>{{.Name}}</strong> <span class="badge text-bg-light">{{.Entity}}</span>{{if .Deleted}} <span class="badge text-bg-secondary">{{$.T "link.server_missing"}}</span>{{end}}</span>
+		<span class="small text-body-secondary">{{$.Time .Created}}</span>
+	</div>
+	<div class="card-body">
+		{{if .Error}}<div class="alert alert-warning small py-2"><i class="bi bi-exclamation-triangle"></i> {{$.T "link.rejected"}} <span class="font-monospace">{{.Error}}</span></div>
+		{{else if .Unknown}}<div class="alert alert-secondary small py-2"><i class="bi bi-info-circle"></i> {{$.T "link.rejected_old"}}</div>{{end}}
+		{{if .Hidden}}<p class="small text-body-secondary mb-0"><i class="bi bi-lock"></i> {{$.T "link.versions_admin_only"}}</p>{{else}}
+		<div class="row g-3">
+			<div class="col-md-6"><div class="small fw-semibold mb-1">{{$.T "link.local_version"}}</div><pre class="small bg-body-tertiary p-2 rounded" style="max-height:260px;overflow:auto">{{.Local}}</pre></div>
+			<div class="col-md-6"><div class="small fw-semibold mb-1">{{$.T "link.server_version"}}</div><pre class="small bg-body-tertiary p-2 rounded" style="max-height:260px;overflow:auto">{{if .Deleted}}{{$.T "link.server_missing"}}{{else if .Unknown}}{{$.T "link.server_unknown"}}{{else}}{{.Server}}{{end}}</pre></div>
+		</div>{{end}}
+		<form method="post" action="/link/conflicts/{{.ID}}" class="d-flex gap-2 mt-2">
+			<input type="hidden" name="_csrf" value="{{$.CSRF}}">
+			{{if .Deleted}}<button class="btn btn-outline-danger btn-sm" name="keep" value="server" data-confirm="{{$.T "link.delete_here_confirm"}}" title="{{$.T "link.delete_here_hint"}}">{{$.T "link.delete_here"}}</button>
+			{{else if not .Unknown}}<button class="btn btn-outline-primary btn-sm" name="keep" value="server" title="{{$.T "link.keep_server_hint"}}">{{$.T "link.keep_server"}}</button>{{end}}
+			<button class="btn btn-outline-secondary btn-sm" name="keep" value="local" title="{{$.T "link.keep_local_hint"}}">{{$.T "link.keep_local"}}</button>
+			<button class="btn btn-outline-secondary btn-sm" name="keep" value="ignore" title="{{$.T "link.keep_ignore_hint"}}">{{$.T "link.keep_ignore"}}</button>
+		</form>
+	</div>
+</div>
+{{end}}
+{{end}}
+{{end}}
+{{define "scripts"}}
+<script src="/static/js/healthchecks.js?v={{.Version}}"></script>
+{{if or .Data.State.PendingCode .Data.State.Requesting}}<script src="/static/js/link.js?v={{.Version}}" id="link-poll" data-had-code="{{if .Data.State.PendingCode}}1{{end}}"></script>{{end}}
+{{end}}

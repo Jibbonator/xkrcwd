@@ -1,0 +1,659 @@
+# Changes – DNS64
+
+## 1.45.0 – 2026-11-19
+
+### New
+- Blocklists: custom lists can be renamed (pencil next to the name; empty = name from the address). The new name applies at once, also in the query log and in "Check domain" – without restarting the DNS service and without reloading the list (#224).
+
+### Fixed
+- Devices, query log and top clients: IPv6 addresses without a name (privacy addresses the router has no name for) get the name of the IPv4 address of the same device (same MAC from the neighbour table or DHCP) (#223).
+- A custom upstream seemed impossible to delete: if saving failed, the message was shown at the top of the page out of sight because the page jumps to the "Upstreams" section. Messages after saving now appear right above the section. Deleting uses the address of the upstream instead of its position in the list (#231).
+
+## 1.44.0 – 2026-11-18
+
+### Changed
+- Blocklists: the overall limit of all lists now follows the memory of the device or the memory limit of the container instead of a fixed 4 million rules: a quarter of the memory, at least 4 and at most 32 million rules (32-bit systems at most 8 million) – e.g. about 16 million with 8 GB. A rule takes a little over 38 bytes; while reloading, the new set briefly sits next to the old one. The hint "Not fully loaded" names the limit in effect.
+
+## 1.43.1 – 2026-11-17
+
+### Fixed
+- Device groups: the device table now sorts the “Group” column by the selected group instead of the text of all choices; devices without a group stay together, a second click reverses the order (#207).
+
+## 1.43.0 – 2026-11-16
+
+### New
+- Adding and editing a DHCP network is easier: you pick the interface from a list of this node (name and address, e.g. "eth0 – 192.168.1.20/24"; Docker, VPN and VM interfaces only via "Other …" with a text field). A saved interface that does not exist right now stays visible as "(not found)". The chosen interface fills in the network; when the network changes, address range and router move along (same host parts, limited in smaller networks). Fields changed by hand stay as they are and get a hint if they no longer fit the network. Without JavaScript the text field remains.
+
+## 1.42.1 – 2026-11-16
+
+### Fixed
+- Rewrites with an IP address as target (e.g. *.example.de → 192.168.1.10) returned NXDOMAIN. Now an IPv4 address answers A, an IPv6 address AAAA, other types get no answer (no NXDOMAIN); IPv6 addresses are now allowed as target too (#174).
+
+## 1.42.0 – 2026-11-15
+
+### New
+- DNS rebinding protection (settings, on by default): answers from the internet no longer return addresses of the home network (private, ULA, loopback, link-local) for public names. Exempt are own records, local zones and names, forwards, releases, ipv64 domains, plex.direct, the suffixes of the Docker labels and own suffixes ("More suffixes without rebinding protection", synced in the cluster). The query log shows "rebinding protection", "Release" lifts it for the name. If your own domain points to devices in your home network publicly, add it there.
+
+### Security
+- Home network CA: new installations get a CA that only allows local names (.lan, .home.arpa …), your own DoH/DoT names and local zones. An existing CA stays; the "Encrypted" page shows a hint with the button "Create new restricted CA" and instructions (devices then need the new CA or the new profile). Names the CA does not allow are missing from the certificate and are listed there.
+- Docker bridge network: queries arriving through the Docker gateway (Docker replaces the device address there, e.g. with IPv6 without ip6tables) are refused – they could also come from the internet. Overview, query log and settings then show a hint: network_mode: host is recommended; if you are sure the Docker host is not reachable from the internet, add the gateway under "Further allowed client networks" (without device groups).
+
+## 1.41.1 – unreleased
+
+### Security
+- Docker labels: names only with a local suffix (.lan, .home.arpa, .internal …), in a local zone or under a suffix allowed in the settings under "More suffixes" (new, per node, e.g. your own domain). Other names are shown with a hint on the settings page; records already created for them disappear until the domain is allowed.
+- CSV export of own records protected against spreadsheet formulas; the import removes the protection again.
+- Unencrypted upstreams (dns://) only accept answers that match the question asked.
+- Blocklists: at most 4 million rules across all lists together, so small devices do not run out of memory; affected lists show "Not fully loaded".
+
+## 1.41.0 – 2026-11-15
+
+### New
+- Works with IPAM64: fixed addresses, exclusions in the DHCP range and A/AAAA records from IPAM64 carry the label "IPAM64" with a link there. While IPAM64 runs they cannot be changed here (UI and API); without IPAM64 as usual. DHCP and DNS keep working from their own tables – also on the reserve node and on nodes without IPAM64.
+- DHCP: exclusions in the range – the server never assigns such addresses (e.g. devices with a fixed setting inside the pool); a lease on one is refused at the next renewal. The DHCP page lists them below the fixed addresses.
+- Cluster: labels and exclusions are synced with the fixed addresses and records.
+- DHCP: while IPAM64 runs, "make fixed" on a lease creates the fixed address in IPAM64 (with DNS record and reservation).
+
+### Fixed
+- Upstreams: Mullvad is no longer a preset – Mullvad shut down its public encrypted DNS. If Mullvad is switched on, it stays as an own upstream until removed (better switch to Quad9 or another server); switched-off Mullvad presets disappear (#162).
+- Blocklists: if a list contains IP addresses instead of domains (e.g. the ipv64.net honeypot list, meant for firewalls), the list shows a hint instead of a bare "0" entries. DNS64 blocks names; IP lists belong in PROXY64 → Blocklists (#164).
+- IPv6 DNS via RA: if a router service runs on the same host (radvd, odhcpd, dnsmasq), DNS64 no longer sends an own RA even right after a restart. Before, the first RA (router lifetime 0, same source address) could take the IPv6 default route away from devices until the router service sent again. The service is now detected at once by its router membership on the interface; the withdrawal on stop is skipped then as well.
+- IPv6 DNS via RA: router solicitations from devices without an address yet (source "::") are answered.
+- Device names: if the neighbour table knows a device only by IPv6, its IPv4 DHCP lease counts again – otherwise the name had no A record.
+- Own block list and allow list: a hosts line added by hand with a tab ("0.0.0.0<tab>ads.example.com") is read instead of being removed from the file at the next save.
+- Custom filter rules read hosts lines like the blocklists: "192.168.1.10 nas.lan" (a mapping, not a block) and lines with several names are reported as invalid instead of blocking nas.lan or only the first name.
+- Blocklists: plain IP addresses no longer count as a domain entry. How many lines of a list gave no DNS rule (e.g. browser rules) is shown as a hint on the number of entries (API `skipped`).
+- Docker bridge network: a Docker network attached later no longer counts as a query from outside in the "port published" check.
+- DHCP in a cluster: the reserve node checks the primary node in the background instead of in the packet path – during failover the DHCP server no longer stalls up to one second per primary node and packet.
+- IPAM64: addresses are checked completely before writing; a manual entry taken over by IPAM64 is released instead of deleted on an error. Import, setup assistant and sync read DHCP networks and own addresses once per batch instead of per reservation.
+
+## 1.40.1 – 2026-11-14
+
+### Changed
+- User management: TSIG keys of local zones (`/api/dns64/zones/{id}/tsig`, Local DNS page) for administrators only; "Read only" sees the zones without keys.
+
+## 1.40.0 – 2026-11-14
+
+### New
+- Custom filter rules in AdGuard/Adblock style (Blocklists → "Custom filter rules", API `GET/PUT /api/dns64/rules`): `||example.com^` blocks, `@@||example.com^` allows (each including subdomains), plus plain domains and hosts lines. The single "Allow" and "Block" fields, the import and the files `allowlist.txt`/`denylist.txt` understand the same rules. `$client=` is rejected with a hint to device groups (forum 5162, #70).
+- Blocked queries show the rule in the query log (also live): "blocklist: <name>", own blocklist, group block or "service <name> blocked"; plus a button "Which list contains this domain?" (#122).
+- "Check domain" on the Blocklists page (API `GET /api/dns64/lookup`): all blocklists with a rule for the domain, own blocks and allows, allowlists, group rules, services and categories (#122).
+- The description of an own PTR or A record is the client name in the query log, the top clients and the devices – after the name from the device group, before the technical PTR name (#119).
+
+### Fixed
+- Docker bridge network: if port 53 is bound to a single host address only (`192.168.2.8:53:53/udp`), the self-check no longer reports it as "not published" once queries from the LAN arrive or the port binding of the own container (Docker socket) shows it (#137).
+- A custom classic upstream (e.g. a local Unbound as `192.168.1.5:5335`) appears in the upstream overview; so far the list stopped at it, and it and the local DNS line were missing (forum 5151).
+
+## 1.39.3 – 2026-11-13
+
+### Fixed
+- Devices show their MAC address even if no group has a MAC member (#79).
+- Query log, devices and blocklists sort correctly by time again, also across days (#80, #123).
+- The "ports not published" notice in Docker bridge networks mentions the host firewall (e.g. ufw) as a common cause of a false alarm.
+
+## 1.39.2 – 2026-11-11
+
+### Security
+- DHCP names: device names of a zone with "devices" are never assigned via DHCP any more, not even to "the device itself" – any device can set the MAC in a DHCP packet. The zone answers the name (for a device by MAC also with the address from its lease). Lease addresses only count for a device when the neighbour table does not know it right now, and never with an address that belongs to another MAC there.
+- DHCPDECLINE only blocks the address the declining client got itself (so far a single packet could block another device's address for an hour and fill the list with arbitrary addresses).
+- Router Advertisements: only RAs from link-local addresses count, and the list of foreign routers is limited (an RA flood with changing senders filled the memory).
+
+### Fixed
+- DHCP only hands out this node as DNS server when DNS64 really runs here (e.g. not while port 53 is taken); after DNS64 starts or settings change (port, bind address) the new state applies right away – so far DHCP kept the state of its last start.
+- DHCP detects a newly created interface (VLAN) and a changed node address every minute (server ID, DNS option) and reopens the socket.
+- Cluster: a release (RELEASE) of an address no longer comes back to life via another node. A reserve no longer hands out addresses in a network while the main node answers directly (DNS on its server ID) – even if only the connection between the nodes is broken (important for relay networks).
+- DHCP names: "whoever has a name keeps it" also holds after a restart.
+- Router Advertisements: if a router service (radvd, odhcpd) already runs on the same host, Node64 no longer sends its own RAs on that interface – they would have removed the default route from the devices. Hint on the page.
+
+## 1.39.1 – 2026-11-10
+
+### Security
+- DHCP names: a device can no longer take over a device name of a local zone with “Devices” via its DHCP hostname (e.g. `nas.home.lan` from the device groups when DHCP network and zone share the domain). So far the DHCP name answered before the zone. The device itself (same MAC or IP as in the group) keeps its DHCP name; names are rebuilt after changes to groups or zones.
+- DHCP: requests with giaddr (relay) for a directly attached network only count when they arrive on its interface – a device can no longer occupy leases and names in another network with a forged giaddr. Networks “behind a DHCP relay” unchanged.
+
+## 1.39.0 – 2026-11-10
+
+### New
+- IPv6: DNS via router advertisement (on the DHCP page, opt-in per node, off by default). The node announces itself as DNS server on the chosen interfaces via RA (RDNSS, search domain via DNSSL) – this also works on Android, which has no DHCPv6. Node64 is not a router here: router lifetime 0, no prefixes; addresses from the provider prefix and the route still come from the router, whose M/O flags the own RA takes over. Announced is the ULA address of the interface (stays when the prefix changes), otherwise the global one; when switched off the node withdraws the announcement. Every node in the cluster announces itself (#59).
+- “Routers in the network”: prefixes, whether devices get an address (SLAAC/DHCPv6), default router and which DNS server the router names itself – with a hint if it announces a different DNS server (then set the router's DNSv6 server to Node64). With the sender off via “Check network” (router solicitation).
+- Prometheus: `node64_dns64_ra_up`, `node64_dns64_ra_sent_total`, `node64_dns64_ra_announcing`. API: `GET`/`PUT /api/dns64/dhcp/ipv6`, `POST /api/dns64/dhcp/ipv6/probe`.
+
+## 1.38.1 – 2026-11-09
+
+### Fixed (second review of the DHCP server)
+- Leases the DHCP server still confirms right before a restart (after a change) are known to the new server; so far it could hand out the address a second time.
+- DNS64 reports “two DHCP servers” only for reachable nodes – no longer for failed nodes or nodes removed from the cluster; two primary nodes no longer additionally report each other as “other DHCP server”.
+- The node state (standby node, further DNS servers of the devices) belongs to the area “DHCP networks” – the other nodes are thus in option 6 with this area as described.
+- Fixed addresses from the cluster are taken over even if they match an address of this node (so far the sync failed permanently).
+- A repeated DISCOVER during the ARP check no longer gets a premature second offer.
+
+## 1.38.0 – 2026-11-09
+
+### New
+- DHCP in Prometheus (`/api/metrics`, only when DHCP is not off): server running, dry run, per network assignable, leased and fixed addresses, errors and standby, requests per type, results (offered, leased, declined …) and other DHCP servers (#59).
+
+### Fixed
+- Apple device profiles (`.mobileconfig`, DoH/DoT under “For devices”) install on macOS and iOS – so far installation failed with “The VPN Service payload could not be installed” because the system-wide scope was missing (#60).
+- Blocklists over 64 MB are no longer cut off silently: the list is shortened at the last complete line (so far possibly in the middle of a name) and shows the hint “list larger than 64 MB”. Split larger lists into several (forum 5057).
+
+## 1.37.1 – 2026-11-09
+
+### Fixed (review of the DHCP server)
+- Standby node: steps in per network as soon as the primary node for that network is gone – regardless of other nodes in the cluster (so far any reachable node kept it silent). Every node publishes its DHCP state in the area “DHCP networks” (role, switch, server ID per network).
+- Two primary nodes in the same network are detected and reported; primary and standby node no longer hide each other as other DHCP servers.
+- DHCP stayed off after a simultaneous DNS64 restart or kept running after DNS64 was turned off; “Off” and disabling the last network still showed the server as active.
+- Notifications arrive as DNS64 messages with their own translated text and a link to the DHCP page.
+- Leases deleted in the cluster also disappear from the running server; older leases of another node no longer push out a running one.
+- Renewals outside the (reduced) range or on the router address get a NAK; fixed addresses on the router or node address are rejected.
+- Devices behind a DHCP relay renew by unicast in the right network; NAK via a relay with the broadcast bit.
+- DHCP names: whoever has a name keeps it; own records and rewrites take precedence; wpad, isatap and localhost are never handed out.
+- DNS servers of the devices: the bind address of DNS64 instead of the address in the network; if DNS64 does not answer on port 53 here, the other nodes or the router. The other nodes are in option 6 after a restart too.
+- The network of an existing network can no longer be changed (cluster identifier); networks must not overlap.
+- A DHCP server running locally (e.g. dnsmasq) now visibly blocks port 67 instead of running alongside unnoticed.
+- Other DHCP servers disappear from the notice 30 minutes after their last answer and are reported again later.
+- More robust: saving outside the server lock (a backup no longer holds up DHCP), ARP check of new addresses concurrently, pending offers survive a restart, missing interfaces and VLANs are searched for every minute, cluster takeovers restart the server in a batch.
+
+## 1.37.0 – 2026-11-09
+
+### New
+- DHCP and DNS hand in hand: every device with an address from the DHCP server gets a name like `laptop.home.lan` including reverse lookup – from the fixed address or from the device itself (domain of the network). Own records take precedence; if a name is taken, the second device gets none. Query log and top clients show the names even in networks without a domain.
+- Fixed address with device group: when adding it, DNS64 can put the MAC into a device group right away. MAC rules of the groups work thanks to the DHCP leases even when the neighbour table does not know the device.
+- Networks behind a DHCP relay (e.g. VLANs behind the router) without an interface of the node in that network.
+- Cluster: new areas “DHCP networks”, “DHCP: fixed addresses” and “DHCP leases” (off by default). A network taken over arrives switched off; interface, switch and role stay per node. If DNS is empty, devices also get the other nodes in the network as DNS servers after this node. The names from the leases work on all nodes with the area.
+- Standby node: a second node with the role “standby” only hands out addresses when the primary node is really gone (not reachable in the cluster and no answer as DHCP server for 3 minutes); it knows all leases and gives every device its address again. Cluster nodes do not count as other DHCP servers.
+
+## 1.36.0 – 2026-11-09
+
+### New
+- DHCP server, its own menu item under DNS64 (#59). Off by default – without turning it on, DNS64 uses no port. Hands out IPv4 addresses per network and interface (VLANs and several networks too), with router, domain, NTP and this node as DNS server.
+- Dry run: only listens and shows which devices ask and which address they would get; other DHCP servers on the network are detected and reported (also as a notification).
+- Fixed addresses (also with one click from a leased address), list of leased addresses with release, recent requests, usage per network with a notification at 90 %.
+- Before every new lease an ARP request checks whether the address is already in use; “authoritative” makes devices get a new address right away when switching from the router.
+- PXE/netboot per network (boot server, files for BIOS, UEFI and iPXE, e.g. netboot.xyz) and DHCP relay (giaddr) for networks behind a router.
+- API `/api/dns64/dhcp` (mode, networks, fixed addresses, leases). Port 67/UDP shows up in the port overview as soon as DHCP is on.
+- Requirement: host network (`network_mode: host`) or macvlan; in the Docker bridge network DHCP is blocked.
+
+## 1.35.1 – 2026-11-09
+
+### Fixed
+- Block and allow lists understand AdGuard rules with a single bar: `@@|name^` exempts exactly this name (in allow lists: allows exactly it), `|name^` blocks exactly it; modifiers such as `$important` are accepted. Such lines used to be ignored silently (forum v64.tech 5065). Rules without a bar (`name^`, `@@name^`) apply to the name and its subdomains.
+
+## 1.35.0 – 2026-11-08
+
+### New
+- Add several blocklists at once (one URL per line, optionally "name | URL"); edit your own blocklist as a text field, duplicate and invalid lines are reported (#19).
+- Allow lists from the web: add, switch on/off and reload them like blocklists; they win over every blocklist, also for groups with their own list selection. In a cluster, older nodes accept the setting only after their update.
+- Device groups: label and up to 10 tags per device, filter by tag and search; synced in the cluster (#24).
+- Block services with a click – about 40 services such as TikTok, YouTube, Instagram, Discord, WhatsApp, Steam or ChatGPT, per group and in schedules (#19).
+- Own records from Docker labels: containers with `node64.dns.name` (optionally `node64.dns.ip` or `container`) get records on this node that follow address changes and disappear after removal (switch in the settings, #18). They deliver no PTR; the sync never touches records created by hand.
+- Query log: custom records show the answer they delivered (e.g. → 10.10.78.16) or NODATA (#50).
+- Client names in the query log, top clients and device list: from the device group first, then your own PTR/A records, only then from the router (#49).
+
+### Fixed
+- Your own blocklist and the import of allowed domains understand hosts lines (`0.0.0.0 domain`); an IP alone counts as invalid.
+- At most 64 enabled blocklists – beyond that the page reports what was not added (until now extra lists were silently ignored).
+
+## 1.34.1 – 2026-11-08
+
+### Fixed
+- Docker with macvlan or ipvlan (own LAN address, e.g. Unraid `br0`/`bond0`): DNS64, PROXY64 and the port overview
+  wrongly warned that ports were not published on the Docker host (`-p` missing). Node64 now detects the network type
+  via netlink and only checks in a real bridge network (#23, thanks to @sangandi).
+- Upstreams "in order": a failed upstream is skipped after 3 errors in a row and only asked last – first for 30
+  seconds, longer while the outage lasts, at most 5 minutes. A query in the background checks whether it answers
+  again; then it is back in front at once. Until now every new query waited 1–2 seconds for it (#37).
+  `GET /api/dns64/upstreams` shows the pause in `pausedUntil`.
+- Upstreams: the answer REFUSED (e.g. a wrong `access-control` on your own Unbound) counts as an error and leads to the
+  next upstream instead of going to the devices (#37). In "parallel" mode a good answer wins.
+
+## 1.34.0 – 2026-11-06
+
+### New
+- Local API: switch dynamic updates of a zone on and off via `PUT /api/dns64/zones/{id}` (field `dynamic`), fetch the TSIG key with `GET /api/dns64/zones/{id}/tsig` and renew it with `POST …/tsig` – like on the page. Lists still never show the key.
+- Local API: `POST /api/dns64/groups/unassign` removes a device from its group by MAC and/or IP (like “No group”).
+- API docs: own blocklist (`/api/dns64/denylist`) added.
+
+## 1.33.0 – 2026-11-06
+
+### New
+- mDNS bridge (Settings, switch “.local names and device names via mDNS”, off by default): DNS64 asks the devices in your own network for names like printer.local and passes them on as normal DNS – also to devices in other networks and in the VPN. If the router doesn't know a device, its name for the query log and statistics also comes via mDNS. One-shot queries with a short wait and a cache, no multicast into other networks; only answers from your own network are accepted. If a name exists with IPv4 only, the IPv6 query gets “no record” instead of “does not exist”. A brake limits the queries (e.g. for network scanners). Settings and overview show how many devices answer. Only works if Node64 is directly in the LAN (host network or macvlan).
+- With the switch on, DNS64 also detects the router's own suffix (e.g. .home-net) from its device names and sends such names to the router like .lan; learned suffixes survive restarts and expire after 7 days without confirmation. It never learns internet suffixes (DynDNS domains like duckdns.org included).
+
+## 1.32.0 – 2026-11-03
+
+### New
+- Overview: the cards top blocked/allowed domains and top clients have an "All" button at the top right. It opens the full list with pages, search and sorting by name, queries and blocked (API `GET /api/dns64/top/list`).
+
+## 1.31.2 – 2026-11-02
+
+### Changed
+- Shorter hint texts; details are in the docs.
+
+## 1.31.1 – 2026-10-30
+
+### Fixed
+- Plain DNS servers with a link-local address and zone (`fe80::1%eth0`) work as upstream or forward; before, all queries
+  to them failed silently.
+- Encrypted page: opening it via an IPv6 address without port (`[fd00::5]`) gives valid DoH/DoQ addresses and a valid
+  iOS profile again.
+- Reverse lookups for the global IPv6 addresses of the own home network go to the router instead of public upstreams
+  (if a router is known); `fc00::/8` and `::1` count as local too.
+- DoH/DoQ via link-local addresses: group rules apply again.
+- Own AAAA records with a zone or a `::ffff:` address are rejected.
+- Networks in groups and additional client networks given as `::ffff:` prefix are converted to IPv4 networks (they never
+  matched before).
+- Settings: notice when a fixed address is set – devices of the other IP family then get no DNS.
+- Router DNS shown without square brackets for IPv6.
+
+## 1.31.0 – 2026-10-28
+
+### Fixed
+- An own CNAME and a rewrite pointing at each other no longer crash the service (SERVFAIL).
+- DNSSEC queries for top-level domains (DS/DNSKEY/NS/SOA, e.g. "com") go to the upstreams; device names without a dot
+  still go to the router.
+- Restarting after settings changes no longer leaves DNS off when stopping hangs or the request is cancelled.
+- Cache: CD bit kept separate, NXDOMAIN/NODATA behind a CNAME cached only briefly (SOA, at most 5 minutes), memory budget,
+  answers over 16 KB are not cached.
+- Plain upstreams (dns://) get a random query ID.
+- Dynamic updates (RFC 2136) are applied all or nothing; the cluster no longer reports bogus deletions.
+
+## 1.30.0 – 2026-10-26
+
+### Changed
+- Upstream mode "fastest": 1–6 servers can now be asked at the same time (previously 1–3, default stays 2).
+
+## 1.29.1 – 2026-10-26
+
+### Changed
+- Phone: the query log, the upstream list in the settings, custom DNS records, forwards, rewrites, devices and group
+  members show one card per entry instead of a wide table; the
+  upstream cards on the overview wrap IP addresses and URL instead of running off the screen.
+
+
+## 1.29.0 – 2026-10-26
+
+### Added
+- Own blocklist: block domains (including subdomains) yourself – with the “Block” button in the query log or in the new
+  card below “Released domains”. It applies to all devices in addition to the blocklists; releasing the same domain
+  lifts the block, a more specific release (e.g. cdn.example.com) wins. Syncable as its own cluster area, included in
+  the export.
+- Own upstream as a plain DNS server: just enter the IP address (e.g. 8.8.8.8, port 53, or IP:port). Marked as
+  “DNS (unencrypted)” in the list.
+- “Queries over time” with its own chart period: 30 min, 6 h, 24 h, 7 days.
+
+### Changed
+- Query log: when a device asks for a public domain with its local search domain appended (e.g.
+  example.com.home.local), the entry says “search domain appended by the device”. The device does this itself, usually
+  after the real query failed (e.g. SERVFAIL because the upstreams briefly did not answer) – DNS64 appends nothing.
+
+## 1.28.1 – 2026-10-24
+
+### New
+- Docker bridge network: DNS64 checks through the Docker gateway whether its ports are published on the host (probe
+  name via UDP, TCP, DoT, DoQ or DoH to gateway:port – a published port leads back into the container). If one is
+  missing, the port overview and a warning on overview, query log, settings and encryption say so, with an example for
+  `docker run` (`-p 53:53/udp -p 53:53/tcp`) and `compose` (`ports:`) or `network_mode: host`. Checked shortly after
+  start and every 30 minutes; skipped in host networking.
+- Query log: hints why client addresses are missing or look the same – queries with the address of the Docker gateway
+  (Docker replaces the sender), refused queries from networks that are not allowed (not in the log, e.g. another VLAN
+  or, in a bridge network, the home network's public IPv6) and shortened or unstored client addresses.
+
+## 1.28.0 – 2026-10-23
+
+### Changed
+- Overview, dashboard card and device list stay fast with millions of log entries: while writing the query log DNS64
+  keeps counters per minute and frequencies per domain and client per hour; KPIs, timeline and top lists read only
+  these (before, every call counted all entries of the period, with “context canceled” and long loading times). On
+  update DNS64 builds the counters once from the existing log.
+- The log page counts matches up to 100,000 and then shows “100,000+”.
+
+## 1.27.4 – 2026-10-23
+
+### Fixed
+- Queries of the router itself (1.27.2): a local target is no longer sent back to the router via rewrites, own CNAME
+  records, SafeSearch or split DNS either (the query could loop otherwise).
+
+## 1.27.3 – 2026-10-23
+
+### Fixed
+- Router detection (1.27.2): probe names `*.node64-probe.invalid` from other devices are still answered immediately,
+  but no longer remembered – only the ones just sent by the node itself (memory grew with every such query before).
+
+## 1.27.2 – 2026-10-23
+
+### Fixed
+- Docker bridge network with published port 53: the router search found the Docker gateway (e.g. 172.17.0.1), which
+  sent the query back into the container – local names and the reverse lookup of client names (PTR) looped endlessly
+  (millions of PTR queries from 172.17.0.1, full CPU, slow dashboard). The search now detects with a probe name when
+  the candidate is the node itself and skips it.
+- General loop protection: queries coming from the router itself (e.g. router with Node64 as upstream) are not sent
+  back to the router for local names.
+
+## 1.27.1 – 2026-10-22
+
+### Fixed
+- Import of many records (hosts file, CSV, JSON, zone file) in one transaction: 5000 records in a fraction of a second
+  instead of minutes (before, everything was reloaded per record; an import of 3000 aborted with the client after 20 s).
+- Cluster with thousands of records: the sending node serves the last reported state, the receiving node writes
+  directly and rebuilds the DNS table in batches – 3000 records in 0.2 s instead of about 45 s.
+
+## 1.27.0 – 2026-10-22
+
+### New
+- Own menu entry **"Local DNS"** below DNS64 (tabs zones and forwarding); DNS64 itself stays the ad blocker. The old
+  addresses `/dns64/records` and `/dns64/forwards` redirect.
+- Zone view (L5): zones on the left with their record count, "All records" and "Without zone"; records of the
+  selected zone on the right, names relative to the zone (`@` = the zone itself). Per zone: default TTL, SOA (refresh,
+  retry, expire, TTL for "does not exist", responsible mail). A network like `192.168.1.0/24` becomes the reverse zone.
+- Zone file (L6): export per zone in BIND format (`$ORIGIN`, `$TTL`, SOA, NS, relative names, comments); import of
+  zone files (e.g. from Bind, Technitium, Windows DNS) through the same import as hosts file/CSV/JSON – SOA values go
+  to the zone, NS and unsupported types are skipped.
+- Dynamic updates per RFC 2136 (L7): switchable per zone with a TSIG key (HMAC-SHA256, created by the node,
+  renewable). DHCP servers like pfSense, OPNsense or Kea register names themselves (A, AAAA, CNAME, TXT, PTR, SRV, MX,
+  DHCID); prerequisites and deletes per RFC, all or nothing. Without a valid key, outside the zone or for SOA/NS the
+  update is refused. Records created by updates are marked; the key stays on the node (never in API, export or cluster).
+- API: `GET /api/dns64/zones/{id}/zonefile`, `POST /api/dns64/records/import?zone=…` (also zone files).
+
+## 1.26.0 – 2026-10-22
+
+### New
+- DNS64 in the cluster (phase L4): under "Cluster" DNS64 shows seven switches, all off by default – settings
+  (upstreams, mode, blocking mode, cache, anonymisation, retention, Firefox, notifications), blocklists, allowlist,
+  custom records with local zones, forwarding with rewrites, device groups (rules, categories, child safety, domains,
+  schedules, block/free) and the members of the groups (belong to the site). An area is only synced with nodes that
+  have it switched on too; the newer change wins.
+- "This node only" per custom record and per forwarding: never synced, and an equal entry of another node does not
+  overwrite it.
+- Never synced: ports, interfaces, router, DoH/DoT/DoQ, names and certificate, client networks, pause, query log.
+- Groups have a cluster id (`uid`); if the same group (same name) already exists on both nodes, it is merged on the
+  first sync.
+- A node takes over the entries even while DNS64 is (still) switched off there.
+
+## 1.25.0 – 2026-10-22
+
+### New
+- Local zones (phase L2, card "Local zones" under "Custom records"): DNS64 answers names below a zone like
+  `home.lan` itself – custom records, SOA/NS of the zone and, if the zone is "authoritative", NXDOMAIN with SOA for
+  unknown names (otherwise on to forwarding and the router).
+- Device names: devices of the device groups with a label appear as `<name>.<zone>` (e.g. "Tablet Lea" →
+  `tablet-lea.home.lan`) with their current IP from the neighbour table (MAC) or the entered IP, including reverse
+  lookup; can be switched off per zone. The card lists the names with their addresses.
+- Configuration export/import carries the zones.
+- API: `GET|POST /api/dns64/zones`, `PUT|DELETE /api/dns64/zones/{id}`, `POST /api/dns64/zones/{id}/enable|disable`, `GET /api/dns64/device-names`.
+
+## 1.24.0 – 2026-10-22
+
+### New
+- Forwarding (phase L3, new tab "Forwarding"): domain → own DNS servers, e.g. `company.local` to the VPN DNS or
+  `192.168.0.0/16` (becomes the reverse zone) to the router. Servers as IP, IP:port, `tls://`, `https://` or
+  `quic://`, in order with failover to the next; the longest matching domain wins.
+  Blocklists and group rules keep applying, except for local names and private reverse lookups. If no server answers,
+  the result is SERVFAIL – the name never goes to the public upstreams. Test button per forwarding (SOA), statistics
+  per server, reason "forwarding … via …" in the query log.
+- Rewrites: a name (also `*.domain`) answers like another one; DNS64 resolves the target itself and answers under the
+  queried name without CNAME. Chains are followed, loops give SERVFAIL.
+- Configuration export/import carries forwarding and rewrites.
+- Prometheus: `node64_dns64_forward_up`, `node64_dns64_forward_requests_total`, `node64_dns64_forward_errors_total` (`domain`, `server`).
+- API: `GET|POST /api/dns64/forwards`, `PUT|DELETE /api/dns64/forwards/{id}`, `POST /api/dns64/forwards/{id}/enable|disable|test`,
+  `GET|POST /api/dns64/rewrites`, `PUT|DELETE /api/dns64/rewrites/{id}`, `POST /api/dns64/rewrites/{id}/enable|disable`.
+
+## 1.23.0 – 2026-10-22
+
+### New
+- Custom records as a local DNS server (phase L1, plan `docs/PLAN-NODE64-DNS64-LOKAL.md`):
+  - More types TXT, MX, SRV, PTR (name may be the IP) and CAA; values are checked and normalised.
+  - Edit in the same form, comment per record, reverse lookup (PTR) can be switched off per A/AAAA record.
+  - Import from a hosts file, CSV or JSON (text or file; localhost and 0.0.0.0 lines are skipped),
+    export as hosts file, CSV or JSON; search in the list.
+  - API: `PUT /api/dns64/records/{id}`, `POST /api/dns64/records/import`, `GET /api/dns64/records/export?format=hosts|csv|json`.
+
+## 1.22.3 – 2026-10-22
+
+### Fixed
+- Start hung (whole node without UI) when DNS64 registered a route at the shared entrance during start (notice page
+  of a group with an "internet off" schedule, DoH via port 443) and the entrance had to open port 80/443 for it first:
+  its port check asked DNS64 and waited for the running start. The port overview now reads the state without that lock.
+
+## 1.22.2 – 2026-10-21
+
+### Fixed
+- Blocklists: files of removed lists under `/data/dns64/lists/` are deleted at start and no longer pile up
+  (configured lists, also switched-off ones and those of groups, stay).
+- Port overview (Settings › Ports): DNS, DoH, DoT and DoQ report their start error (e.g. "permission denied" or missing certificate).
+
+## 1.22.1 – 2026-10-21
+
+### Fixed
+- Start page card: "blocking paused until" shows the time in the node's time zone (previously the container's,
+  usually UTC), with the date if it is another day.
+
+## 1.22.0 – 2026-10-21
+
+### Changed
+- Default upstreams for new installations: Cloudflare and Quad9 (DoH) plus dnsforge via DoQ and DoH (servers in Germany only). Existing installations keep their selection; dnsforge can be ticked there under *Upstream servers*.
+
+## 1.21.0 – 2026-10-20
+
+### New
+- European upstream presets, each in its unfiltered variant (DNS64 filters itself):
+  - DNS4EU (Whalebone, Czech Republic, co-funded by the EU): DoH and DoT, `unfiltered.joindns4.eu`;
+  - dnsforge (adminForge, servers in Germany only): DoH, DoT and DoQ, variant “Blank” `blank.dnsforge.de`;
+  - Freifunk München (Germany, second site in Vienna): DoH, DoT and DoQ (`doh.ffmuc.net`, `dot.ffmuc.net`, `doq.ffmuc.net`);
+  - Digitalcourage (Germany): DoT only, `dns3.digitalcourage.de`.
+- On existing installations the presets appear switched off; the default for new installations stays Cloudflare + Quad9. DNS0.EU is missing because the service has been discontinued.
+
+## 1.20.0 – 2026-10-19
+
+### New
+- Device groups, phase G5:
+  - Prometheus: `node64_dns64_group_queries_total{group,status}`, `node64_dns64_group_internet_off{group}`, `node64_dns64_group_free{group}`, `node64_dns64_group_members{group}`.
+  - Configuration export/import carries the groups (members, rules, releases/blocks, schedules; without button state). A group of the same name on the new node stays as it is.
+  - Dashboard card: number of groups and how many are blocked right now.
+  - API: `GET /api/dns64/groups` returns the state of each group (`state`: internet_off, free, by_button, until_released, until, schedule), e.g. for Home Assistant.
+- This completes the plan device groups and child safety (G1–G5).
+
+## 1.19.0 – 2026-10-19
+
+### New
+- Schedules per device group (phase G4): on chosen weekdays from–to (also across midnight or all day, in the node’s time zone) either “internet off” or additional blocked categories; each can be switched on and off.
+- Instant buttons per group: “Block” (30 min, 1 or 2 h, until tomorrow 7:00, until released) acts like “internet off”; “Free” (30 min, 1 or 2 h) suspends schedules and categories, blocklists keep applying; “Release” ends both. The state is shown in the group header.
+- “Internet off”: only local names, custom records and the group’s releases work; all other names get the node’s address (TTL 10 s). If the device opens a page via http://, the shared entrance shows a notice on port 80 (group, reason, until when); for https:// the browser only shows a certificate error. Port 80 is only opened for this while a group can be blocked.
+- Query log: reasons “internet off” and “schedule …: internet off”. API: `POST /api/dns64/groups/{id}/hold`, `POST /api/dns64/groups/{id}/schedules`, `POST /api/dns64/groups/schedules/{id}/enable|disable`, `DELETE /api/dns64/groups/schedules/{id}`.
+
+## 1.18.0 – 2026-10-19
+
+### New
+- SafeSearch per device group (phase G3): one switch redirects Google (all country domains), Bing and DuckDuckGo to their SafeSearch addresses via CNAME and YouTube into restricted mode (strict, moderate or off). Also applies when the group released the domain; HTTPS stays untouched.
+- Protection against bypassing per group: switches on the HaGeZi DoH/VPN/Proxy Bypass list for the group and answers `mask.icloud.com`/`mask-h2.icloud.com` (iCloud Private Relay) and `use-application-dns.net` (Firefox DoH) with NXDOMAIN.
+- Firefox uses DNS64: `use-application-dns.net` is answered with NXDOMAIN globally so Firefox switches off its built-in DoH (like Pi-hole, on by default, can be switched off under *Settings*).
+- Query log: reasons “SafeSearch → …”, “Firefox DoH switched off”, “iCloud Private Relay off”. API: `safesearch`, `youtube`, `bypass` in `PUT /api/dns64/groups/{id}/rules`, `firefox_canary` in the settings.
+
+## 1.17.0 – 2026-10-19
+
+### New
+- Rules per device group (phase G2), under *Groups → Rules*:
+  - blocklists like for all devices or an own selection from all presets and own lists;
+  - block categories: social networks, games and streaming (small lists maintained by Node64, e.g. TikTok, Instagram, Roblox, Fortnite, YouTube, Netflix), gambling and adult content (switch on HaGeZi Gambling or HaGeZi NSFW for the group);
+  - own releases and blocks per group (with subdomains). Order: release of the group before block of the group before categories before blocklists.
+- DNS64 loads the globally enabled lists plus those a group uses in addition – each list once; which one applies to whom is a bit mask per rule (at most 64 lists).
+- Query log: reason “blocked for group” or “category …”.
+- API: `PUT /api/dns64/groups/{id}/rules`, `POST /api/dns64/groups/{id}/domains`, `DELETE /api/dns64/groups/domains/{id}`; `GET /api/dns64/groups` includes the rules.
+
+### Changed
+- Trackers hidden behind CNAMEs are also checked for answers from the cache (the cache is shared by all groups).
+- The global pause suspends blocklists and categories, not a group's own blocks.
+
+## 1.16.0 – 2026-10-19
+
+### New
+- Device groups (phase G1): new tab “Groups”. Create, rename and order groups (order = priority) and assign devices – by MAC address from the host’s neighbour table first (IPv4 and IPv6, via netlink), otherwise by IP address or network. A device thus stays in its group even with a new IPv6 or IPv4 address. A device belongs to at most one group.
+- Devices of the last 24 hours (from the query log, with name from the router and MAC) can be assigned to a group with one click.
+- Query log: group next to the client and filter by group (also “no group”); API `GET /api/dns64/log?group=`.
+- API: `GET|POST /api/dns64/groups`, `PUT|DELETE /api/dns64/groups/{id}`, `POST /api/dns64/groups/{id}/move`, `POST /api/dns64/groups/{id}/members`, `DELETE /api/dns64/groups/members/{id}`, `GET /api/dns64/devices`; every change in the audit log.
+- For now all groups share the same rules; lists, SafeSearch and schedules per group follow.
+
+## 1.15.0 – 2026-10-19
+
+### New
+- 20 more blocklist presets (all off, checked for maintenance on 2026-10-19): HaGeZi Pro++, Ultimate and Pop-up Ads, Peter Lowe's Ad Servers; security: HaGeZi Fake (fake shops, subscription traps), HaGeZi Badware Hoster, Phishing Filter from malware-filter (CC0); bypass: HaGeZi DoH/VPN/Proxy Bypass (foreign DoH servers, VPNs, proxies); device tracking: HaGeZi Native Tracker for Samsung, LG webOS, Amazon, Apple, Windows/Office, Xiaomi, Huawei, TikTok and Roku; child safety: HaGeZi Gambling, HaGeZi NSFW, OISD NSFW.
+- Presets carry a category badge (ads, tracking, security, device tracking, bypass, child safety).
+- Lists: lines like `*.example.com` apply to the domain and its subdomains (used by Peter Lowe); `*.com` alone never blocks a whole TLD.
+
+## 1.14.1 – 2026-10-19
+
+### New
+- Help links: on all DNS64 pages and at the main cards and fields (upstreams, mode, blocklists, allowlist, custom records, encryption, certificate, devices, client networks, router, notifications) a question mark opens the matching place of the documentation on node64.de in the language of the interface.
+
+## 1.14.0 – 2026-10-19
+
+### New
+- Prometheus: queries per result and protocol, response times, refused queries, cache, blocklists, state and
+  errors per upstream, and pause at `GET /api/metrics` (see docs/PROMETHEUS.md).
+- Configuration export/import: the certificate from the certificate management is carried along and assigned on the new node (export with password, which contains the certificates).
+
+### Fixed
+- Overview: timeline, top clients and top domains stayed empty (error "disk I/O error") once the query log was large enough for SQLite to want temporary files while sorting. The container has no directory for them; intermediate results now stay in memory.
+- Display: DNS64 logo is light in the dark theme.
+- Port overview (Settings → Ports): DoH/DoT/DoQ only count as active when the service actually started (previously also on certificate errors).
+
+## 1.13.0 – 2026-10-18
+
+### New
+- Internationalized domain names (IDN): entries such as `bücher.example` in blocklists (hosts, one domain per line, Adblock), in the allowlist and in custom records are converted to Punycode (`xn--bcher-kva.example`) and take effect; previously they were skipped as invalid.
+
+### Changed
+- Query log: expired entries are deleted in chunks of 5,000 rows, with writing continuing in between. A large backlog (e.g. after shortening the retention) no longer locks the database in one go, and no log entries are lost.
+
+## 1.12.0 – 2026-10-16
+
+### New
+- Happy Eyeballs for the upstream servers (DoH, DoT, DoQ): IPv6 and IPv4 bootstrap addresses alternate, the next attempt starts after 250 ms or immediately on an error, and the most recently successful family goes first. A hanging address (IPv6 without a route, blocked IPv4) thus costs at most 250 ms instead of 2 s per connection.
+- Router for local names over IPv6 as well: if there is no IPv4 gateway with DNS, DNS64 uses the IPv6 default gateway (link-local with interface, e.g. `fe80::1%eth0`). The router can now also be entered as an IPv6 address with zone or as `[IPv6]:Port`.
+
+### Changed
+- Hints under Settings mention IPv4 and IPv6 (address "all addresses (IPv4 and IPv6)", router).
+- Test: DNS over UDP, TCP and DoT answers via 127.0.0.1 and ::1, including AAAA.
+
+## 1.11.0 – 2026-10-16
+
+### Removed
+- DNS64's own Let's Encrypt integration (issuance and renewal via DNS-01, form on the encryption page, `GET|POST /api/dns64/acme`, `POST /api/dns64/acme/renew`, notification "DNS64 certificate"). Certificates are issued and renewed by the central certificate management, which also reports errors and expiry. The ipv64 API key is no longer needed in DNS64.
+
+### Changed
+- Installations that have not been migrated (e.g. terms of service not accepted) keep serving the previous Let's Encrypt certificate until the migration succeeds; the encryption page shows the reason. For this, the migration still reads `acme/` and the settings `dns64.acme_*`.
+
+## 1.10.0 – 2026-10-16
+
+### New
+- Certificates from the central certificate management: under *Encryption → Certificate* any valid certificate from the certificate management can be selected ("From certificate management"). When the certificate management renews it, DNS64 picks it up immediately without a restart; the list there shows "used by: DNS64".
+- The home network CA lives in the certificate management; it issues the server certificate for DNS64 and reissues it when names or private IPs change.
+
+### Changed
+- One-time migration on first start: DNS64's own home network CA (same key, devices keep trusting it) and an existing Let's Encrypt certificate including its key move into the certificate management, which handles renewal from then on; the acceptance of the terms of service is carried over. Afterwards the mode is set to "From certificate management". If anything fails, everything stays as before and the migration is retried on the next start. The previous files are kept as a fallback.
+- New Let's Encrypt certificates are created in the certificate management; DNS64's own issuance remains only as a fallback for installations that have not been migrated and will be removed in a later version.
+
+## 1.9.0 – 2026-10-16
+
+### New
+- Upstream mode "fastest (automatic)": each query goes only to the currently fastest servers (configurable 1–3, default 2) at the same time; the first good answer wins. The ranking is derived continuously from real response times; servers not currently being queried are re-measured every 30 s with a small query (which also keeps their connection warm). If the first ones do not answer in time (four times their usual time, 0.3–1.5 s), the next one is added; if all fail, the remaining ones are queried. Instead of 5–6 outgoing queries as with "Parallel", this usually means 2.
+- Overview: the servers currently in use are marked "being queried"; API `GET /api/dns64/upstreams` returns `count` and `active` per server, settings `upstream_count`.
+
+### Changed
+- New installations start with "fastest (automatic)"; saved settings stay as they are.
+
+## 1.8.0 – 2026-10-15
+
+### Changed
+- Client access list hardened: "Additional client networks" reject 0.0.0.0/0 and ::/0 (existing entries of this kind no longer apply). Networks on the node's own interfaces only count if they are private or an IPv6 /64 (or smaller); otherwise a public IPv4 network on a rented server would have admitted the neighbors in the data center.
+
+### New
+- DoH via the core's shared entry point: if the DoH port is the entry point's HTTPS port (default 443), DNS64 no longer opens its own listener but registers `/dns-query` on its names and for requests by IP. DoH and CDN64 thus share port 443; the entry point only lets through devices from the allowed networks (real remote address, otherwise a neutral 404), opens no port 80 for DoH and also offers DoH over HTTP/3. If a name already belongs to a proxy host, only that name is dropped for DoH. A different DoH port runs on its own listener as before.
+- Warning in Settings for public networks in the access list.
+- Rejected queries from unknown addresses are counted (Settings: count, most recent address) and written to the log at most once per hour, so that an accidental exposure gets noticed.
+
+## 1.7.2 – 2026-10-15
+
+### Fixed
+- Under load, a restart or shutdown shortly after start could leave the DNS port (and DoT) occupied: the service only started after the stop and kept running, and a new start then failed with "address in use". Start now waits until the service is running.
+
+## 1.7.1 – 2026-10-15
+
+### Changed
+- Audit log: changes via API key now carry their origin in the "Origin" field (key name); the "(api)" suffix in the details is gone.
+
+## 1.7.0 – 2026-10-14
+
+### New
+- Everything in the UI is also available via the API: set up, issue and renew Let's Encrypt (`GET|POST /api/dns64/acme`, `POST /api/dns64/acme/renew`), enable/disable custom records (`POST /api/dns64/records/{id}/enable|disable`), import allowlist entries (`POST /api/dns64/allowlist/import`), CA and iOS/macOS profile (`GET /api/dns64/ca.crt`, `GET /api/dns64/mobileconfig`), custom upstreams and lists individually (`POST|DELETE /api/dns64/upstreams`, `POST|DELETE /api/dns64/lists`).
+- Every change (settings, upstreams, lists, allowlist, custom records, encryption, Let's Encrypt including acceptance of the terms of service, pause, cache flush) is recorded in the audit log, from both UI and API (actor and IP as in the core, also behind a proxy).
+- OpenAPI with request and response schemas for all DNS64 endpoints.
+
+### Fixed
+- A restart after changed settings and simultaneously disabling the module could leave the DNS port and DoH/DoT/DoQ open; start, stop and restart now run one after another.
+- If stopping hangs, the upstream connections are still closed, followed by the query log.
+- Errors when saving the acceptance of the terms of service were swallowed.
+
+## 1.6.0 – 2026-10-14
+
+### New
+- Pause blocking: button at the top right of all DNS64 pages, for 10 minutes or until re-enabled. The DNS service keeps running, only the blocklists do not apply; custom records, local names and the allowlist remain in effect. The query log shows what would otherwise have been blocked; the dashboard card shows the pause.
+- API: `POST /api/dns64/pause` (`{"minutes": 10}`, 0 = until re-enabled) and `POST /api/dns64/resume`; state in `GET /api/dns64/status` (`blocking`).
+
+## 1.5.0 – 2026-10-14
+
+### New
+- Let's Encrypt: publicly trusted certificate for a name under an ipv64 domain (e.g. dns.<domain>), validated via DNS-01 through the ipv64 API with the central API key; DNS64 waits until the ipv64 name servers serve the TXT record and deletes it afterwards. This makes DoH/DoT/DoQ work on all devices without installing a CA, including Android "Private DNS".
+- Automatic renewal 30 days before expiry; the new certificate takes effect immediately, without restarting the services. Until the first issuance, the services run with DNS64's own home network CA.
+- Optionally, the name is added as a custom record pointing to the node's IP in the home network; the Let's Encrypt staging environment can be selected.
+- Notification `dns64_cert` when issuance or renewal fails.
+
+## 1.4.0 – 2026-10-14
+
+### New
+- Notifications via the default channels: upstream server disrupted for more than 3 minutes and reachable again, blocklist failing to load three times in a row; can be turned off under Settings. Webhook types `dns64_upstream`, `dns64_upstream_ok`, `dns64_lists`.
+- Import allowlist: paste a list (one domain per line, e.g. allowlist.txt from the old DNS64 container or a Pi-hole whitelist).
+
+## 1.3.0 – 2026-10-14
+
+### New
+- Encrypted in the home network: devices query DNS64 directly via DNS-over-HTTPS (RFC 8484, GET and POST, separate port, default 443), DNS-over-TLS (RFC 7858, 853/TCP) and DNS-over-QUIC (RFC 9250, 853/UDP); each service can be enabled individually, a port in use only stops that service.
+- DNS64's own home network CA (10 years, may only certify private addresses) issues the server certificate: all private IPs of the node and the configured names, 800 days, reissued for new names/IPs or shortly before expiry. Alternatively, the web UI's certificate.
+- New "Encryption" tab with status per service, connection details for devices, CA certificate and profile for iPhone/iPad/Mac (DoH or DoT) for download.
+- Query log shows the protocol (TCP, DoH, DoT, DoQ).
+
+## 1.2.0 – 2026-10-14
+
+### New
+- Upstream servers also via DNS-over-TLS (`tls://name[:853]`, RFC 7858) and DNS-over-QUIC (`quic://name[:853]`, RFC 9250); presets for Cloudflare, Quad9, Google, AdGuard and Mullvad over DoT as well as AdGuard over DoQ, custom servers with all three protocols.
+- Certificate verification against the server's name for all protocols; connections are reused (DoT: up to 4 open connections, DoQ: one QUIC connection with one stream per query).
+- Protocol per server visible in Overview and Settings, `proto` in `GET /api/dns64/upstreams`.
+
+## 1.1.0 – 2026-10-14
+
+### New
+- Selectable upstream servers: Cloudflare, Quad9, Google, AdGuard, Mullvad or custom DoH servers with bootstrap IPs; mode parallel (fastest answer) or sequential (fallback on error).
+- Blocklists can be turned on and off, more presets (OISD Big, HaGeZi Pro, HaGeZi Threat Intelligence) and custom list URLs; updates every 6, 12, 24 or 48 hours.
+- Custom DNS records (A, AAAA, CNAME, wildcards such as *.home.lan) with automatic reverse lookup (PTR); take effect immediately, before blocklists, and are never sent to the internet. New "Custom records" tab.
+- Selectable response for blocked queries: 0.0.0.0/:: or NXDOMAIN.
+- Configurable cache size; client addresses in the query log stored in full, truncated (IPv4 /24, IPv6 /48) or not at all.
+- Additional allowed client networks (e.g. public IPv6 prefix, VPN).
+- API: `GET|PUT /api/dns64/settings`, `GET|POST /api/dns64/records`, `DELETE /api/dns64/records/{id}`; export/import includes all settings and the custom records.
+
+### Changed
+- Reasons in the query log (allowed, expired) appear in the UI language.
+- Blocklists are stored in the data directory, named by URL; existing files are taken over.
+
+## 1.0.0 – 2026-10-14
+
+The standalone DNS64 container adopted as a Node64 module.
+
+### New
+- Local DNS resolver for the home network (UDP and TCP, default port 53), only answers private and directly connected networks (no open resolver).
+- Blocking of ads, trackers and malware via 6 blocklists (StevenBlack, AdGuard DNS, OISD Small, HaGeZi Multi, EasyPrivacy, URLhaus), updated every 24 hours; trackers behind CNAMEs are detected.
+- Queries to the internet encrypted via DNS-over-HTTPS (Cloudflare and Quad9 in parallel, fastest valid answer wins).
+- Optimistic cache (20,000 entries): frequent domains are refreshed before expiry, expired entries up to 1 hour old are served immediately.
+- Local names (e.g. fritz.box, .lan, single host names, reverse lookups of private IPs) only go to the router; client device names via PTR.
+- Pages Overview (metrics, timeline, upstreams, cache, top lists), Query log (filters, search, live, allow with one click) as well as Allowlist and Blocklists.
+- Settings: DNS port and address, router for local names, query log retention.
+- Local API `/api/dns64/*`; export/import of settings and allowlist.
+- When turned off, no processes run and no port is open.

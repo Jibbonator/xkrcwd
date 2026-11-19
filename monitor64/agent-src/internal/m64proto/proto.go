@@ -53,6 +53,10 @@ const (
 	SecWinSvc  = "winsvc" // Windows (Phase 2)
 )
 
+// AllSections sind alle Abschnitte von collect (z. B. "alle ausser SMART" anfragen; unbekannte uebergeht der Agent).
+var AllSections = []string{SecCPU, SecMem, SecLoad, SecFS, SecDisk, SecNet, SecBond, SecSmart, SecRAID, SecZFS, SecTemp, SecSystemd,
+	SecUpdates, SecReboot, SecLocal, SecWinSvc}
+
 // Info beschreibt Agent und Host (Antwort auf "info").
 type Info struct {
 	V        int      `json:"v"`
@@ -69,6 +73,9 @@ type Info struct {
 
 // Report ist die Antwort auf "collect" (bzw. das Ergebnis der SSH-Abfrage ohne Agent).
 type Report struct {
+	// PkgStamp: Stand der Paketdatenbank aus dem SSH-Skript (Abschnitt pkgstamp); nur in der Node, nie uebertragen
+	PkgStamp string `json:"-"`
+
 	V      int     `json:"v"`
 	Time   int64   `json:"t"`                // Unix-Millisekunden (Uhr des Hosts; nur fuer Raten zwischen zwei Berichten)
 	Uptime float64 `json:"uptime,omitempty"` // Sekunden

@@ -1,0 +1,30 @@
+{{define "content"}}
+{{$d := .Data}}
+<h1 class="h4 mb-3"><i class="bi bi-journal-text text-success me-1"></i> {{.T "audit.title"}}{{$.Doc "security#audit-log"}}{{.Doc "security#audit-log"}}</h1>
+<ul class="nav nav-pills small mb-3 flex-wrap gap-1">
+	<li class="nav-item"><a class="nav-link py-1 px-2{{if not $d.Area}} active{{end}}" href="/audit">{{.T "audit.area.all"}}</a></li>
+	{{range $d.Areas}}<li class="nav-item"><a class="nav-link py-1 px-2{{if eq . $d.Area}} active{{end}}" href="/audit?area={{.}}">{{$.T (print "audit.area." .)}}</a></li>{{end}}
+</ul>
+{{if not $d.Entries}}
+<p class="text-body-secondary">{{.T "audit.empty"}}</p>
+{{else}}
+<div class="table-responsive table-shadow">
+<table class="table table-sm table-striped table-cards">
+	<thead><tr><th>{{.T "common.time"}}</th><th>{{.T "audit.actor"}}</th><th>{{.T "audit.action"}}</th><th>{{.T "audit.target"}}</th><th>{{.T "common.details"}}</th><th>{{.T "audit.origin"}}</th></tr></thead>
+	<tbody>
+	{{range $d.Entries}}
+	<tr>
+		<td data-label="{{$.T "common.time"}}" class="text-nowrap">{{$.Time .Time}}</td>
+		<td data-label="{{$.T "audit.actor"}}">{{.Actor}}</td>
+		<td data-label="{{$.T "audit.action"}}"><span title="{{.Action}}">{{$.AuditAction .Action}}</span></td>
+		<td data-label="{{$.T "audit.target"}}">{{.Target}}</td>
+		<td data-label="{{$.T "common.details"}}" class="text-break">{{.Details}}</td>
+		<td data-label="{{$.T "audit.origin"}}">{{.Origin}}{{if .IP}} · {{.IP}}{{end}}</td>
+	</tr>
+	{{end}}
+	</tbody>
+</table>
+</div>
+{{if $d.Next}}<a class="btn btn-outline-secondary btn-sm" href="/audit?before={{$d.Next}}{{if $d.Area}}&area={{$d.Area}}{{end}}">{{.T "audit.load_more"}}</a>{{end}}
+{{end}}
+{{end}}

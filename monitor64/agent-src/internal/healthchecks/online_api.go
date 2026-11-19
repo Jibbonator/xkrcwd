@@ -1,0 +1,402 @@
+package healthchecks
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/ipv64net/node64/internal/checks"
+	"github.com/ipv64net/node64/internal/ipv64api"
+	"github.com/ipv64net/node64/internal/module"
+)
+
+// Online-Checks direkt ueber die ipv64 API v2: Ist die Node nicht ueber den Healthchecks-Sync mit den hubs
+// verknuepft, aber ein zentraler API-Key hinterlegt, verwaltet sie die Online-Checks des Accounts direkt
+// (anlegen, aendern, pausieren, pruefen, loeschen). Gemessen wird bei ipv64; die Zustaende kommen beim Laden
+// der Seite. Hybrid-Checks, Live-Zustaende und Benachrichtigungen ueber ipv64 brauchen den Sync.
+
+// SetAPI haengt den zentralen API-Key an (nil = keine Online-Checks ueber die API).
+func (m *Module) SetAPI(k *ipv64api.Key) { m.api = k }
+
+// apiMode liefert Key und Client, wenn die Online-Checks ueber die API laufen (Key da, kein Sync).
+func (m *Module) apiMode(ctx context.Context) (string, *ipv64api.Client) {
+	if m.api == nil || (m.linked != nil && m.linked()) {
+		return "", nil
+	}
+	key := m.api.Get(ctx)
+	if key == "" {
+		return "", nil
+	}
+	return key, m.api.Client()
+}
+
+// onlineRow ist ein Online-Check fuer die Uebersicht.
+type onlineRow struct {
+	Token, Name, Type, State, Message string
+	Badge                             Badge
+	Target                            string
+	Interval                          int
+	Locs                              string
+	LastCheck                         time.Time
+	Paused                            bool
+}
+
+type onlineCache struct {
+	mu   sync.Mutex
+	at   time.Time
+	rows []onlineRow
+	err  string
+}
+
+// onlineChecks holt die Online-Checks des Accounts (20 s zwischengespeichert, die Uebersicht laedt
+// sich regelmaessig neu).
+func (m *Module) onlineChecks(ctx context.Context, key string, cl *ipv64api.Client) ([]onlineRow, string) {
+	c := &m.onl
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.at.IsZero() && time.Since(c.at) < 20*time.Second {
+		return c.rows, c.err
+	}
+	lctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	list, err := cl.HC2Checks(lctx, key, "?execution=online")
+	c.at = time.Now()
+	if err != nil {
+		c.err = err.Error()
+		return c.rows, c.err
+	}
+	c.rows, c.err = nil, ""
+	for _, raw := range list {
+		var j checkJSON
+		if json.Unmarshal(raw, &j) != nil {
+			continue
+		}
+		tmp := &Check{Type: checks.Type(j.Type), Target: j.Target, Params: j.Params}
+		r := onlineRow{Token: j.Token, Name: j.Name, Type: j.Type, Badge: tmp.TargetBadge(), Target: tmp.DisplayTarget(), Locs: strings.Join(j.Locations, ", "), State: "pending"}
+		if j.IntervalSeconds != nil {
+			r.Interval = *j.IntervalSeconds
+		}
+		if j.Paused != nil {
+			r.Paused = *j.Paused
+		}
+		if j.State != nil {
+			r.State, r.LastCheck, r.Message = j.State.State, j.State.LastCheckAt, j.State.LastMessage
+		}
+		if r.Locs == "" {
+			r.Locs = "fsn, nbg"
+		}
+		c.rows = append(c.rows, r)
+	}
+	return c.rows, ""
+}
+
+func (m *Module) onlineInvalidate() {
+	m.onl.mu.Lock()
+	m.onl.at = time.Time{}
+	m.onl.mu.Unlock()
+}
+
+func (m *Module) onlineRoutes(mux *http.ServeMux, g module.Guards) {
+	page := func(h http.HandlerFunc) http.Handler { return g.Enabled(g.Auth(h)) }
+	mux.Handle("GET /healthchecks/online/new", page(m.onlineForm))
+	mux.Handle("POST /healthchecks/online/new", page(m.onlineSubmit))
+	mux.Handle("GET /healthchecks/online/{token}/edit", g.Enabled(g.AdminAuth(http.HandlerFunc(m.onlineForm)))) // zeigt Passwort und Kopfzeilen
+	mux.Handle("POST /healthchecks/online/{token}/edit", page(m.onlineSubmit))
+	mux.Handle("POST /healthchecks/online/{token}/{action}", page(m.onlineAction))
+}
+
+// onlineForm zeigt das Check-Formular fuer einen Online-Check (Werte von ipv64 beim Bearbeiten).
+func (m *Module) onlineForm(w http.ResponseWriter, r *http.Request) {
+	key, cl := m.apiMode(r.Context())
+	if key == "" {
+		http.Redirect(w, r, "/healthchecks", http.StatusSeeOther)
+		return
+	}
+	d := formData{Form: formDefaults(), APIMode: true}
+	d.Form["execution"] = "online"
+	if t := r.PathValue("token"); t != "" {
+		j, err := m.remoteCheck(r.Context(), key, cl, t)
+		if err != nil {
+			m.g.Flash(w, r, "danger", m.g.T(r, "hc.api.error")+": "+err.Error())
+			http.Redirect(w, r, "/healthchecks#online", http.StatusSeeOther)
+			return
+		}
+		tmp := &Check{Token: t}
+		j.Execution = "local" // nur fuer die lokale Umwandlung; gemessen wird online
+		if err := m.apply(tmp, j, true); err != nil {
+			d.Error = err.Error()
+		}
+		d.Edit, d.Token, d.Form = true, t, formFromCheck(tmp)
+		d.Form["execution"], d.Form["locations"] = "online", strings.Join(j.Locations, ",")
+	}
+	m.formPage(w, r, http.StatusOK, d)
+}
+
+func (m *Module) remoteCheck(ctx context.Context, key string, cl *ipv64api.Client, token string) (checkJSON, error) {
+	var j checkJSON
+	raw, err := cl.HC2Check(ctx, key, token)
+	if err == nil {
+		err = json.Unmarshal(raw, &j)
+	}
+	return j, err
+}
+
+// onlineSave prueft die Eingaben wie bei lokalen Checks und speichert den Online-Check bei ipv64 (token leer =
+// neu). Gemeinsam fuer Oberflaeche und JSON-API.
+func (m *Module) onlineSave(ctx context.Context, key string, cl *ipv64api.Client, token string, in checkJSON) (json.RawMessage, error) {
+	tmp := &Check{Token: "online"}
+	if err := splitPort(tmp, &in); err != nil {
+		return nil, err
+	}
+	vin := in
+	vin.Execution = "local" // Pruefung der Eingaben wie lokal; die Regel "online nur mit Sync" gilt hier nicht
+	if err := m.apply(tmp, vin, true); err != nil {
+		return nil, err
+	}
+	if tmp.Type != checks.TypePush && tmp.Interval < checks.MinInterval {
+		return nil, errors.New("interval_seconds must be between 20 and 86400 for online checks")
+	}
+	if tmp.Type == checks.TypeWhois && in.RetryIntervalSeconds != nil && *in.RetryIntervalSeconds < int(checks.MinRetryWhois.Seconds()) {
+		v := int(checks.MinRetryWhois.Seconds())
+		in.RetryIntervalSeconds = &v
+	}
+	in.Execution = "online"
+	body := map[string]any{}
+	raw, _ := json.Marshal(in)
+	_ = json.Unmarshal(raw, &body)
+	for _, k := range []string{"token", "owner", "nodes", "revision", "created_at", "updated_at", "push_url", "state", "channels", "parent"} {
+		delete(body, k) // lokale Kanaele und Eltern-Checks gelten bei ipv64 nicht
+	}
+	body["execution"] = "online"
+	if token != "" {
+		if old, gerr := m.remoteCheck(ctx, key, cl, token); gerr == nil {
+			body["channels"], body["force_move"] = old.Channels, true // Kanaele bei ipv64 behalten, Standorte ohne Testlauf
+			if old.Parent != nil {
+				body["parent"] = *old.Parent
+			}
+		}
+	}
+	return cl.HC2SaveCheck(ctx, key, token, body)
+}
+
+// auditOnlineSave schreibt Anlegen/Aendern eines Online-Checks ins Audit, beim Anlegen mit dem Token von ipv64
+// (damit spaetere Eintraege zu pause/resume/delete zuzuordnen sind).
+func (m *Module) auditOnlineSave(r *http.Request, token, name string, saved json.RawMessage) {
+	if token != "" {
+		m.auditText(r, "check.online_update", name+" ("+checks.TokenHint(token)+")")
+		return
+	}
+	var out struct {
+		Token string `json:"token"`
+	}
+	if json.Unmarshal(saved, &out) == nil && out.Token != "" {
+		name += " (" + checks.TokenHint(out.Token) + ")"
+	}
+	m.auditText(r, "check.online_create", name)
+}
+
+// onlineSubmit prueft die Eingaben wie bei lokalen Checks und speichert sie bei ipv64.
+func (m *Module) onlineSubmit(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	key, cl := m.apiMode(ctx)
+	if key == "" {
+		http.Redirect(w, r, "/healthchecks", http.StatusSeeOther)
+		return
+	}
+	token := r.PathValue("token")
+	in, err := checkFromForm(r)
+	var saved json.RawMessage
+	if err == nil {
+		saved, err = m.onlineSave(ctx, key, cl, token, in)
+	}
+	if err != nil {
+		m.log.Warn("online check not saved via ipv64 API", "token", checks.TokenHint(token), "err", err)
+		_ = r.ParseForm()
+		d := formData{Form: formDefaults(), APIMode: true, Edit: token != "", Token: token, Error: err.Error()}
+		for k := range r.PostForm {
+			d.Form[k] = r.PostFormValue(k)
+		}
+		m.formPage(w, r, http.StatusUnprocessableEntity, d)
+		return
+	}
+	m.onlineInvalidate()
+	m.auditOnlineSave(r, token, in.Name, saved)
+	m.g.Flash(w, r, "success", m.g.T(r, "common.saved"))
+	http.Redirect(w, r, "/healthchecks#online", http.StatusSeeOther)
+}
+
+// onlineAction: pausieren, fortsetzen, jetzt pruefen, loeschen.
+func (m *Module) onlineAction(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	key, cl := m.apiMode(ctx)
+	token, action := r.PathValue("token"), r.PathValue("action")
+	if key == "" {
+		http.Redirect(w, r, "/healthchecks", http.StatusSeeOther)
+		return
+	}
+	var err error
+	switch action {
+	case "pause", "resume", "run":
+		err = cl.HC2CheckAction(ctx, key, token, action)
+	case "delete":
+		err = cl.HC2DeleteCheck(ctx, key, token)
+	default:
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		m.log.Warn("online check action via ipv64 API failed", "token", checks.TokenHint(token), "action", action, "err", err)
+		m.g.Flash(w, r, "danger", m.g.T(r, "hc.api.error")+": "+err.Error())
+	} else {
+		m.auditText(r, "check.online_"+action, checks.TokenHint(token))
+		m.onlineInvalidate()
+		m.g.Flash(w, r, "success", m.g.T(r, "hc.api.done_"+action))
+	}
+	http.Redirect(w, r, "/healthchecks#online", http.StatusSeeOther)
+}
+
+// ---------------------------------------------------------------- JSON-API im API-Modus
+
+// Online-Checks per JSON-API, solange die Node nur einen ipv64-API-Key hat (kein Healthchecks-Sync): die Anfragen
+// gehen an die ipv64 API v2 wie in der Oberflaeche. Mit Sync sind Online-Checks normale Checks unter /api/checks.
+
+func (m *Module) onlineAPIRoutes(mux *http.ServeMux, api func(http.HandlerFunc) http.Handler) {
+	mux.Handle("GET /api/online-checks", api(m.apiOnlineList))
+	mux.Handle("POST /api/online-checks", api(m.apiOnlineSave))
+	mux.Handle("GET /api/online-checks/{token}", api(m.apiOnlineGet))
+	mux.Handle("PUT /api/online-checks/{token}", api(m.apiOnlineSave))
+	mux.Handle("DELETE /api/online-checks/{token}", api(m.apiOnlineDelete))
+	mux.Handle("POST /api/online-checks/{token}/{action}", api(m.apiOnlineAction))
+}
+
+func (m *Module) apiOnlineMode(w http.ResponseWriter, r *http.Request) (string, *ipv64api.Client) {
+	key, cl := m.apiMode(r.Context())
+	if key == "" {
+		writeErr(w, http.StatusConflict, "online checks via this endpoint need a stored ipv64 api key and no healthchecks sync (when linked use /api/checks)")
+	}
+	return key, cl
+}
+
+func (m *Module) apiOnlineList(w http.ResponseWriter, r *http.Request) {
+	key, cl := m.apiOnlineMode(w, r)
+	if key == "" {
+		return
+	}
+	list, err := cl.HC2Checks(r.Context(), key, "?execution=online")
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if list == nil {
+		list = []json.RawMessage{}
+	}
+	if m.g.IsReadOnly(r) { // Passwort und Kopfzeilen nur fuer Administratoren
+		for i := range list {
+			list[i] = redactCheckRaw(list[i])
+		}
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+func (m *Module) apiOnlineGet(w http.ResponseWriter, r *http.Request) {
+	key, cl := m.apiOnlineMode(w, r)
+	if key == "" {
+		return
+	}
+	raw, err := cl.HC2Check(r.Context(), key, r.PathValue("token"))
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if m.g.IsReadOnly(r) {
+		raw = redactCheckRaw(raw)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(raw)
+}
+
+func (m *Module) apiOnlineSave(w http.ResponseWriter, r *http.Request) {
+	key, cl := m.apiOnlineMode(w, r)
+	if key == "" {
+		return
+	}
+	token := r.PathValue("token")
+	var body map[string]json.RawMessage
+	if err := readJSON(r, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	if token != "" { // Aendern: nicht genannte Felder behalten den Wert bei ipv64 (wie PUT /api/checks)
+		old, err := cl.HC2Check(r.Context(), key, token)
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		merged := map[string]json.RawMessage{}
+		if err := json.Unmarshal(old, &merged); err != nil {
+			writeErr(w, http.StatusBadGateway, "unexpected answer from ipv64")
+			return
+		}
+		for k, v := range body {
+			merged[k] = v
+		}
+		body = merged
+	}
+	var in checkJSON
+	if b, err := json.Marshal(body); err != nil || json.Unmarshal(b, &in) != nil {
+		writeErr(w, http.StatusBadRequest, "invalid check")
+		return
+	}
+	raw, err := m.onlineSave(r.Context(), key, cl, token, in)
+	if err != nil {
+		writeErr(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	m.onlineInvalidate()
+	status := http.StatusOK
+	if token == "" {
+		status = http.StatusCreated
+	}
+	m.auditOnlineSave(r, token, in.Name, raw)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write(raw)
+}
+
+func (m *Module) apiOnlineDelete(w http.ResponseWriter, r *http.Request) {
+	key, cl := m.apiOnlineMode(w, r)
+	if key == "" {
+		return
+	}
+	token := r.PathValue("token")
+	if err := cl.HC2DeleteCheck(r.Context(), key, token); err != nil {
+		writeErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	m.onlineInvalidate()
+	m.auditText(r, "check.online_delete", checks.TokenHint(token))
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (m *Module) apiOnlineAction(w http.ResponseWriter, r *http.Request) {
+	key, cl := m.apiOnlineMode(w, r)
+	if key == "" {
+		return
+	}
+	token, action := r.PathValue("token"), r.PathValue("action")
+	if action != "pause" && action != "resume" && action != "run" {
+		writeErr(w, http.StatusNotFound, "unknown action (pause, resume, run)")
+		return
+	}
+	if err := cl.HC2CheckAction(r.Context(), key, token, action); err != nil {
+		writeErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	m.onlineInvalidate()
+	m.auditText(r, "check.online_"+action, checks.TokenHint(token))
+	w.WriteHeader(http.StatusAccepted)
+}

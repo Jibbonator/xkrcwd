@@ -1,0 +1,96 @@
+{{define "content"}}
+{{$d := .Data}}
+{{$s := $d.S}}
+<h1 class="h4 mb-3"><i class="bi bi-diagram-3 text-primary me-1"></i> {{if $d.New}}{{.T "cdn64.streams.new"}}{{else}}{{.T "cdn64.streams.edit"}} <span class="font-monospace">{{$s.ListenPort}}</span>{{end}}</h1>
+{{with index $d.Errors "_"}}<div class="alert alert-danger small">{{.}}</div>{{end}}
+<div class="row g-3">
+	<div class="col-xl-7">
+		<form method="post" action="{{if $d.New}}/cdn64/streams{{else}}/cdn64/streams/{{$s.ID}}{{end}}" class="card">
+			<input type="hidden" name="_csrf" value="{{.CSRF}}">
+			<div class="card-body small">
+				<label class="form-label fw-semibold" for="name">{{.T "cdn64.streams.f.name"}}</label>
+				<input class="form-control form-control-sm mb-3{{if index $d.Errors "name"}} is-invalid{{end}}" id="name" name="name" value="{{$s.Name}}" maxlength="100" placeholder="Minecraft">
+				<div class="row g-2 mb-1">
+					<div class="col-sm-4"><label class="form-label fw-semibold" for="listen_port">{{.T "cdn64.streams.f.listen_port"}}</label>
+						<input class="form-control form-control-sm font-monospace{{if index $d.Errors "listen_port"}} is-invalid{{end}}" type="number" min="1" max="65535" id="listen_port" name="listen_port" value="{{if $s.ListenPort}}{{$s.ListenPort}}{{end}}" required>
+						{{with index $d.Errors "listen_port"}}<div class="invalid-feedback">{{.}}</div>{{end}}</div>
+					<div class="col-sm-8 d-flex align-items-end gap-3 pb-1">
+						<div class="form-check"><input class="form-check-input{{if index $d.Errors "tcp"}} is-invalid{{end}}" type="checkbox" name="tcp" id="tcp"{{if $s.TCP}} checked{{end}}><label class="form-check-label" for="tcp">TCP</label></div>
+						<div class="form-check"><input class="form-check-input" type="checkbox" name="udp" id="udp"{{if $s.UDP}} checked{{end}}><label class="form-check-label" for="udp">UDP</label></div>
+						{{with index $d.Errors "tcp"}}<span class="text-danger">{{.}}</span>{{end}}
+					</div>
+				</div>
+				<div class="row g-2 mb-1 mt-1">
+					<div class="col-sm-8"><label class="form-label fw-semibold" for="target_host">{{.T "cdn64.f.target_host"}}</label>
+						<input class="form-control form-control-sm font-monospace{{if index $d.Errors "target_host"}} is-invalid{{end}}" id="target_host" name="target_host" value="{{$s.TargetHost}}" required placeholder="192.168.1.40" maxlength="253">
+						{{with index $d.Errors "target_host"}}<div class="invalid-feedback">{{.}}</div>{{end}}</div>
+					<div class="col-sm-4"><label class="form-label fw-semibold" for="target_port">{{.T "cdn64.f.target_port"}}</label>
+						<input class="form-control form-control-sm font-monospace{{if index $d.Errors "target_port"}} is-invalid{{end}}" type="number" min="1" max="65535" id="target_port" name="target_port" value="{{if $s.TargetPort}}{{$s.TargetPort}}{{end}}" required>
+						{{with index $d.Errors "target_port"}}<div class="invalid-feedback">{{.}}</div>{{end}}</div>
+				</div>
+				<div class="form-text mb-3">{{.T "cdn64.streams.f.hint"}}</div>
+				<label class="form-label fw-semibold" for="tls_cert_id">{{.T "cdn64.streams.f.tls"}}</label>
+				<select class="form-select form-select-sm mb-1{{if index $d.Errors "tls_cert_id"}} is-invalid{{end}}" id="tls_cert_id" name="tls_cert_id">
+					<option value="0">{{.T "cdn64.streams.f.tls_none"}}</option>
+					{{range $d.Certs}}{{if not .NotAfter.IsZero}}<option value="{{.ID}}"{{if eq $s.TLSCertID .ID}} selected{{end}}>{{join .Names ", "}}</option>{{end}}{{end}}
+				</select>
+				{{with index $d.Errors "tls_cert_id"}}<div class="invalid-feedback">{{.}}</div>{{end}}
+				<div class="form-text mb-3">{{.T "cdn64.streams.f.tls_hint"}}</div>
+				<input type="hidden" name="has_pp" value="1">
+				<div data-tcp-only>
+					<label class="form-label fw-semibold" for="proxy_protocol">{{.T "cdn64.streams.f.proxy_protocol"}}</label>
+					<select class="form-select form-select-sm mb-1{{if index $d.Errors "proxy_protocol"}} is-invalid{{end}}" id="proxy_protocol" name="proxy_protocol" data-proxy-protocol>
+						<option value="">{{.T "cdn64.f.proxy_protocol_off"}}</option><option value="v1"{{if eq $s.ProxyProtocol "v1"}} selected{{end}}>{{.T "cdn64.f.proxy_protocol_v1"}}</option><option value="v2"{{if eq $s.ProxyProtocol "v2"}} selected{{end}}>{{.T "cdn64.f.proxy_protocol_v2"}}</option></select>
+					{{with index $d.Errors "proxy_protocol"}}<div class="invalid-feedback">{{.}}</div>{{end}}
+					<div class="form-text mb-3">{{.T "cdn64.f.proxy_protocol_hint"}}</div>
+				</div>
+				{{if $d.OnlineOn}}<input type="hidden" name="has_online" value="1">
+				<label class="form-label fw-semibold" for="online_name"><i class="bi bi-cloud-arrow-up text-primary"></i> {{.T "cdn64.streams.f.online"}}{{$.Doc "cdn64-online#portmapper"}}</label>
+				<select class="form-select form-select-sm mb-1" id="online_name" name="online_name"{{if not $d.OnlineNames}} disabled{{end}}>
+					<option value="">{{.T "cdn64.streams.f.online_none"}}</option>
+					{{range $d.OnlineNames}}<option value="{{.Name}}"{{if eq $s.OnlineName .Name}} selected{{end}}>{{.Name}} ({{$.T "cdn64.online.mode_badge" "n" .Mode}})</option>{{end}}
+				</select>
+				<div class="form-text mb-3">{{if $d.OnlineNames}}{{.T "cdn64.streams.f.online_hint"}}{{else}}{{.T "cdn64.streams.f.online_empty"}}{{end}}
+					<a href="/cdn64/hosts/new?kind=stream" data-stream-names>{{.T "cdn64.streams.f.online_new"}}</a></div>{{end}}
+				<input type="hidden" name="has_geo" value="1">
+				<label class="form-label fw-semibold" for="geo_mode">{{.T "cdn64.f.geo"}}{{$.Doc "cdn64#laendersperre"}}</label>
+				<div class="row g-2">
+					<div class="col-md-4"><select class="form-select form-select-sm" id="geo_mode" name="geo_mode">
+						<option value="">{{.T "cdn64.f.geo_off"}}</option>
+						<option value="block"{{if eq $s.GeoMode "block"}} selected{{end}}>{{.T "cdn64.f.geo_block"}}</option>
+						<option value="allow"{{if eq $s.GeoMode "allow"}} selected{{end}}>{{.T "cdn64.f.geo_allow"}}</option>
+					</select></div>
+					<div class="col-md-8"><input class="form-control form-control-sm font-monospace{{if index $d.Errors "geo"}} is-invalid{{end}}" id="geo_countries" name="geo_countries" value="{{$d.GeoText}}" placeholder="DE, AT, CH" maxlength="400" list="geo-cc" autocomplete="off">
+						{{with index $d.Errors "geo"}}<div class="invalid-feedback">{{.}}</div>{{end}}</div>
+				</div>
+				{{if $d.Countries}}<datalist id="geo-cc"><option value="EU" data-flag="🇪🇺" data-alt="European Union">{{.T "cdn64.f.geo_eu"}}</option>{{range $d.Countries}}<option value="{{.Code}}" data-flag="{{.Flag}}" data-alt="{{.Local "en"}} {{.Name}}">{{.Local $.Lang}}</option>{{end}}</datalist>{{end}}
+				<div class="form-text mb-3">{{.T "cdn64.f.geo_hint"}}</div>
+				<input type="hidden" name="has_bw" value="1">
+				<div class="row g-2 mb-1" data-bw>
+					<div class="col-md-4"><label class="form-label fw-semibold" for="bw_down"><i class="bi bi-cloud-download"></i> {{.T "cdn64.f.adv_bw_down"}}</label>
+						<div class="input-group input-group-sm"><input class="form-control{{if index $d.Errors "bw"}} is-invalid{{end}}" type="number" min="0" max="100000" id="bw_down" name="bw_down" value="{{if $s.BWDownMbit}}{{$s.BWDownMbit}}{{end}}" placeholder="{{.T "cdn64.f.adv_bw_unlimited"}}" data-bw-mbit><span class="input-group-text">Mbit/s</span></div>
+						<div class="form-text" data-bw-mb></div></div>
+					<div class="col-md-4"><label class="form-label fw-semibold" for="bw_up"><i class="bi bi-cloud-upload"></i> {{.T "cdn64.f.adv_bw_up"}}</label>
+						<div class="input-group input-group-sm"><input class="form-control{{if index $d.Errors "bw"}} is-invalid{{end}}" type="number" min="0" max="100000" id="bw_up" name="bw_up" value="{{if $s.BWUpMbit}}{{$s.BWUpMbit}}{{end}}" placeholder="{{.T "cdn64.f.adv_bw_unlimited"}}" data-bw-mbit><span class="input-group-text">Mbit/s</span></div>
+						<div class="form-text" data-bw-mb></div></div>
+				</div>
+				{{with index $d.Errors "bw"}}<div class="invalid-feedback d-block">{{.}}</div>{{end}}
+				<div class="form-text mb-3">{{.T "cdn64.streams.f.bw_hint"}}</div>
+				<div class="form-check form-switch"><input class="form-check-input" type="checkbox" name="enabled" id="enabled"{{if $s.Enabled}} checked{{end}}><label class="form-check-label" for="enabled">{{.T "cdn64.f.enabled"}}</label></div>
+			</div>
+			<div class="card-footer d-flex gap-2">
+				<button class="btn btn-primary btn-sm" type="submit">{{.T "common.save"}}</button>
+				<a class="btn btn-outline-secondary btn-sm" href="/cdn64/streams">{{.T "common.cancel"}}</a>
+			</div>
+		</form>
+	</div>
+	<div class="col-xl-5">
+		<div class="card"><div class="card-body small">
+			<div class="fw-semibold mb-1"><i class="bi bi-info-circle text-info"></i> {{.T "cdn64.help_title"}}</div>
+			<p class="mb-2">{{.T "cdn64.streams.help_ports"}}</p>
+			<p class="mb-0">{{.T "cdn64.streams.help_docker"}}</p>
+		</div></div>
+	</div>
+</div>
+{{end}}
+{{define "scripts"}}<script src="/static/js/cdn64.js?v={{.Version}}"></script>{{end}}

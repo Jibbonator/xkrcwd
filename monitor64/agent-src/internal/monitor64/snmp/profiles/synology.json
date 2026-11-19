@@ -1,0 +1,245 @@
+{
+  "id": "synology",
+  "name": "Synology DSM",
+  "device": "nas",
+  "verified": false,
+  "source": "SYNOLOGY-SYSTEM-MIB, SYNOLOGY-DISK-MIB, SYNOLOGY-RAID-MIB (Synology MIB Guide)",
+  "match": {
+    "object_ids": [
+      ".1.3.6.1.4.1.8072.3.2.10",
+      ".1.3.6.1.4.1.6574"
+    ],
+    "descr": [
+      "synology"
+    ],
+    "probe": ".1.3.6.1.4.1.6574.1.1.0"
+  },
+  "scalars": [
+    {
+      "key": "syno:system",
+      "service": "Synology System",
+      "kind": "hw",
+      "oid": ".1.3.6.1.4.1.6574.1.1.0",
+      "text": {
+        "1": "i18n:monitor64.snmp.system_ok",
+        "2": "i18n:monitor64.snmp.system_bad"
+      },
+      "fact": {
+        "code": "hw_failed",
+        "ok": [
+          1
+        ],
+        "text": "i18n:monitor64.snmp.system_failed"
+      }
+    },
+    {
+      "key": "syno:system",
+      "service": "Synology System",
+      "kind": "hw",
+      "oid": ".1.3.6.1.4.1.6574.1.3.0",
+      "text": {
+        "1": "i18n:monitor64.snmp.psu_ok",
+        "2": "i18n:monitor64.snmp.psu_failed"
+      },
+      "fact": {
+        "code": "hw_failed",
+        "ok": [
+          1
+        ],
+        "text": "i18n:monitor64.snmp.psu_failed"
+      }
+    },
+    {
+      "key": "syno:system",
+      "service": "Synology System",
+      "kind": "hw",
+      "oid": ".1.3.6.1.4.1.6574.1.4.1.0",
+      "text": {
+        "1": "i18n:monitor64.snmp.fan_ok",
+        "2": "i18n:monitor64.snmp.fan_failed"
+      },
+      "fact": {
+        "code": "hw_failed",
+        "ok": [
+          1
+        ],
+        "text": "i18n:monitor64.snmp.sys_fan_failed"
+      }
+    },
+    {
+      "key": "syno:system",
+      "service": "Synology System",
+      "kind": "hw",
+      "oid": ".1.3.6.1.4.1.6574.1.4.2.0",
+      "fact": {
+        "code": "hw_failed",
+        "ok": [
+          1
+        ],
+        "text": "i18n:monitor64.snmp.cpu_fan_failed"
+      }
+    },
+    {
+      "key": "syno:system",
+      "service": "Synology System",
+      "kind": "hw",
+      "oid": ".1.3.6.1.4.1.6574.1.5.1.0",
+      "label": "i18n:monitor64.snmp.model"
+    },
+    {
+      "key": "syno:system",
+      "service": "Synology System",
+      "kind": "hw",
+      "oid": ".1.3.6.1.4.1.6574.1.5.3.0",
+      "label": "DSM"
+    },
+    {
+      "key": "syno:system",
+      "service": "Synology System",
+      "kind": "hw",
+      "oid": ".1.3.6.1.4.1.6574.1.5.4.0",
+      "text": {
+        "1": "i18n:monitor64.txt.update_available",
+        "2": "",
+        "3": "",
+        "4": "",
+        "5": ""
+      }
+    },
+    {
+      "key": "temp:system",
+      "service": "i18n:monitor64.svc.temp?name=System",
+      "kind": "temp",
+      "oid": ".1.3.6.1.4.1.6574.1.2.0",
+      "metric": "temp",
+      "unit": "°C",
+      "rule": "temp.system",
+      "min": -40,
+      "max": 150
+    }
+  ],
+  "tables": [
+    {
+      "key": "disk:{name}",
+      "service": "i18n:monitor64.svc.disk?name={name}",
+      "kind": "disk",
+      "oid": ".1.3.6.1.4.1.6574.2.1.1",
+      "name_col": 2,
+      "columns": [
+        {
+          "col": 3,
+          "label": "i18n:monitor64.snmp.model"
+        },
+        {
+          "col": 6,
+          "metric": "temp",
+          "unit": "°C",
+          "rule": "disk.temp",
+          "min": -40,
+          "max": 150
+        },
+        {
+          "col": 5,
+          "text": {
+            "1": "Normal",
+            "2": "i18n:monitor64.snmp.initialized",
+            "3": "i18n:monitor64.snmp.not_initialized",
+            "4": "i18n:monitor64.snmp.syspart_failed",
+            "5": "i18n:monitor64.snmp.crashed"
+          },
+          "fact": {
+            "code": "smart_failed",
+            "when": [
+              4,
+              5
+            ],
+            "text": "i18n:monitor64.snmp.disk_failed"
+          }
+        },
+        {
+          "col": 13,
+          "text": {
+            "1": "i18n:monitor64.snmp.healthy",
+            "2": "i18n:monitor64.snmp.warning",
+            "3": "i18n:monitor64.snmp.critical",
+            "4": "i18n:monitor64.snmp.failing"
+          },
+          "fact": {
+            "code": "smart_failed",
+            "when": [
+              3,
+              4
+            ],
+            "text": "i18n:monitor64.snmp.health_critical"
+          }
+        },
+        {
+          "col": 9,
+          "metric": "realloc",
+          "hide": true,
+          "min": 0,
+          "fact": {
+            "code": "smart_sectors",
+            "above": 0,
+            "text": "i18n:monitor64.snmp.bad_sectors"
+          }
+        },
+        {
+          "col": 11,
+          "metric": "wear",
+          "unit": "%",
+          "rule": "ssd.wear",
+          "factor": -1,
+          "offset": 100,
+          "min": 0,
+          "max": 100,
+          "hide": true
+        }
+      ]
+    },
+    {
+      "key": "raid:{name}",
+      "service": "i18n:monitor64.svc.storage_pool?name={name}",
+      "kind": "raid",
+      "oid": ".1.3.6.1.4.1.6574.3.1.1",
+      "name_col": 2,
+      "columns": [
+        {
+          "col": 3,
+          "text": {
+            "1": "Normal",
+            "2": "i18n:monitor64.snmp.repairing",
+            "3": "Migration",
+            "4": "i18n:monitor64.snmp.expanding",
+            "5": "i18n:monitor64.snmp.deleting",
+            "6": "i18n:monitor64.snmp.creating",
+            "7": "i18n:monitor64.snmp.syncing",
+            "8": "i18n:monitor64.snmp.parity_check",
+            "9": "i18n:monitor64.snmp.assembling",
+            "10": "i18n:monitor64.snmp.canceling",
+            "11": "i18n:monitor64.snmp.degraded",
+            "12": "i18n:monitor64.snmp.crashed",
+            "13": "i18n:monitor64.snmp.scrubbing"
+          },
+          "fact": {
+            "code": "raid_degraded",
+            "when": [
+              11,
+              12
+            ],
+            "text": "i18n:monitor64.snmp.pool_degraded"
+          }
+        },
+        {
+          "col": 5,
+          "metric": "used",
+          "rule": "store.used",
+          "pct": {
+            "total": "5",
+            "free": "4"
+          }
+        }
+      ]
+    }
+  ]
+}

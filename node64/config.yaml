@@ -1,0 +1,23 @@
+name: Node64
+version: "1.7.10"
+slug: node64
+description: Node64 by ipv64.net – Healthchecks, DNS64, PROXY64, DynDNS, Monitor64, IPAM64, Honeypot64
+url: https://github.com/ipv64net/node64
+arch:
+  - amd64
+  - aarch64
+startup: system
+boot: auto
+host_network: true
+privileged:
+  - NET_RAW
+webui: http://[HOST]:[PORT:8080]
+watchdog: tcp://[HOST]:[PORT:8080]
+options:
+  log_level: info
+  admin_user: ""
+  admin_password: ""
+schema:
+  log_level: list(debug|info|warn|error)
+  admin_user: str?
+  admin_password: password?

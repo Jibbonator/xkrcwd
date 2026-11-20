@@ -38,10 +38,10 @@ Nach dem Anlegen des Docker-Hosts erscheinen sie als neue Dienste, melden aber
 standardmäßig nichts. Auf der Host-Seite in Monitor64 die gewünschten Container
 übernehmen und „melden“ einschalten (bzw. dauerhaft stumm lassen, wenn nicht gewünscht).
 
-Für Container und Proxmox-Gäste kommt der **Soll-Zustand** dazu: `soll laufen` wertet
-einen Stopp als Problem (kritisch), `darf aus sein` lässt ihn zu, `automatisch` nimmt bei
-Proxmox-Gästen „beim Booten starten“ als Soll. Das ist unabhängig von „melden“ / „nur
-anzeigen“ — Übernehmen, Melden und Soll-Zustand sind drei getrennte Einstellungen.
+Beim Container gehört außerdem der **Soll-Zustand** eingestellt: `soll laufen` wertet
+einen Stopp als Problem (kritisch), `darf aus sein` lässt ihn zu. Ohne passenden
+Soll-Zustand bleibt die Bewertung unbrauchbar. Übernehmen, Melden und Soll-Zustand sind
+drei getrennte Einstellungen.
 
 Gleiches gilt für alle anderen Dienste, inklusive der hier mitgelieferten HA-Checks: erst
 nach dem Übernehmen greifen Schwellen und Benachrichtigungen.

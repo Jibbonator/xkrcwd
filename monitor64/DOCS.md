@@ -118,8 +118,14 @@ Was nicht geht:
 - Zustände mit `|` im Wert.
 
 Fehlerverhalten: fehlt die Entität oder ist die Zeile unlesbar, meldet der Dienst Status 3
-mit dem Hinweis `Format: Name | Ziel | Bedingung`. Änderungen greifen nach einem Neustart
-des Add-ons. Im Add-on-Panel gibt es keinen Hilfetext; Beispiele stehen nur hier.
+(`unknown`) mit dem Hinweis `Format: Name | Ziel | Bedingung`. Änderungen greifen nach
+einem Neustart des Add-ons. Im Add-on-Panel gibt es keinen Hilfetext; Beispiele stehen nur
+hier.
+
+Wichtig zur Meldung: Status 3 zählt in Monitor64 wie eine Warnung. In einer aktiven
+Ruhezeit (Monitor64 → Benachrichtigung, z. B. 23:00–06:00) wird sie deshalb nicht
+verschickt, solange `crit_in_quiet` aus ist. Das Problem wird trotzdem geöffnet und steht
+in Monitor64.
 
 Zertifikate des Docker-Proxys liegen in `/data/proxy`. Der Fingerabdruck bleibt über
 Neustarts gleich, weil sie nur beim ersten Start erzeugt werden.

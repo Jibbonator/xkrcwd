@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.12
+## 0.1.11-5
 
 - Neue Option `custom_services`: eigene Dienste als Zeilen `Name | Ziel | Bedingung`
   (Entität mit `above`/`below`/`state`, oder URL mit `expect`).

@@ -68,6 +68,10 @@ Was geht:
 
 - `above`/`below`: Zahlenvergleich, `warn/crit` oder nur `warn` (dann gilt sie auch für kritisch).
   `above` schlägt bei größer-gleich an, `below` bei kleiner-gleich.
+- Nur Warnung oder nur kritisch: `above 6/100000` warnt ab 6 und wird praktisch nie
+  kritisch; bei `below` umgekehrt, dort das kritische Limit sehr tief setzen, z. B.
+  `below 20/-100000`.
+- Die Reihenfolge zählt: `above 99/6` heißt kritisch ab 6, die 99 ist dann wirkungslos.
 - `state`: Alarm, wenn der Zustand genau dem Wert entspricht (Groß-/Kleinschreibung egal).
 - `url`: vollständige URL; `expect` ist optional, Standard `200`.
 - Der Name ist frei; er wird Teil des Dienstnamens und darf Umlaute enthalten.

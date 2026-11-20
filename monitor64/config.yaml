@@ -1,5 +1,5 @@
 name: Monitor64
-version: "0.1.11-4"
+version: "0.1.12"
 slug: monitor64
 description: Monitor64-Agent (6465), read-only Docker-Proxy (2376) und Home-Assistant-Checks
 arch:
@@ -34,6 +34,7 @@ options:
   enable_updates: true
   enable_integrations: true
   watch_entities: []
+  custom_services: []
   ignore_integrations: []
   entity_backup_last: sensor.backup_letztes_erfolgreiches_automatisches_backup
   entity_backup_state: sensor.backup_backup_manager_zustand
@@ -58,6 +59,8 @@ schema:
   enable_updates: bool
   enable_integrations: bool
   watch_entities:
+    - str
+  custom_services:
     - str
   ignore_integrations:
     - str

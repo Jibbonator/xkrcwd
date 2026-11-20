@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.12
+
+- Neue Option `custom_services`: eigene Dienste als Zeilen `Name | Ziel | Bedingung`
+  (Entität mit `above`/`below`/`state`, oder URL mit `expect`).
+
 ## 0.1.11-4
 
 - Token-Weitergabe korrigiert: Der Agent startet eigene Skripte mit gefilterter

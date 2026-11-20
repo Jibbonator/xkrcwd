@@ -39,6 +39,7 @@ als eigene Dienste in Monitor64. Jeder Check lässt sich einzeln abschalten.
 | `enable_updates` | `true` | Anzahl verfügbarer Updates aus den `update.*`-Entitäten, also HA Core, HA OS, Supervisor und Add-ons (nur Anzeige). |
 | `enable_integrations` | `true` | Config Entries in `setup_error`, `setup_retry`, `migration_error`, `failed_unload`. |
 | `watch_entities` | `[]` | Liste einzelner Entitäten, die auf `unavailable`/`unknown` geprüft werden (leer = aus). |
+| `custom_services` | `[]` | Eigene Dienste, eine Zeile je Dienst im Format `Name | Ziel | Bedingung` (siehe unten). |
 | `ignore_integrations` | `[]` | Domain oder Titel von Integrationen, die beim Integrations-Check nicht zählen (Groß-/Kleinschreibung egal). |
 | `entity_backup_last` | `sensor.backup_letztes_erfolgreiches_automatisches_backup` | Entität mit dem Zeitstempel des letzten erfolgreichen Backups (auf englischen Installationen `sensor.backup_last_successful_automatic_backup`). |
 | `entity_backup_state` | `sensor.backup_backup_manager_zustand` | Zustand des Backup-Managers (`sensor.backup_backup_manager_state`). |
@@ -50,6 +51,37 @@ als eigene Dienste in Monitor64. Jeder Check lässt sich einzeln abschalten.
 
 Der Integrations-Check nutzt den Core-Websocket (`config_entries/get`), weil die REST-API
 diesen Zustand nicht liefert; dafür ist `python3-websocket` im Image.
+
+### Eigene Dienste (`custom_services`)
+
+Eine Zeile pro Dienst, Felder durch `|` getrennt, Leerzeichen sind egal. Der Dienst heißt
+in Monitor64 `Home Assistant Eigene <Name>`.
+
+| Ziel | Bedingung | Beispielzeile |
+|---|---|---|
+| Entität | `above warn/crit` | `Kühlschrank \| sensor.fridge_temp \| above 6/8` |
+| Entität | `below warn/crit` | `Batterie \| sensor.battery \| below 20/10` |
+| Entität | `state wert` | `Leck \| binary_sensor.water_leak \| state on` |
+| URL | `expect code` | `HA API \| url http://supervisor/core/api/ \| expect 200` |
+
+Was geht:
+
+- `above`/`below`: Zahlenvergleich, `warn/crit` oder nur `warn` (dann gilt sie auch für kritisch).
+  `above` schlägt bei größer-gleich an, `below` bei kleiner-gleich.
+- `state`: Alarm, wenn der Zustand genau dem Wert entspricht (Groß-/Kleinschreibung egal).
+- `url`: vollständige URL; `expect` ist optional, Standard `200`.
+- Der Name ist frei; er wird Teil des Dienstnamens und darf Umlaute enthalten.
+
+Was nicht geht:
+
+- Mehrere Bedingungen pro Zeile oder Logik wie AND/OR/Regex.
+- Vergleiche zwischen zwei Entitäten.
+- Formatierungen, Suche in Attributen, Authentifizierung mit eigenen Tokens.
+- Zustände mit `|` im Wert.
+
+Fehlerverhalten: fehlt die Entität oder ist die Zeile unlesbar, meldet der Dienst Status 3
+mit dem Hinweis `Format: Name | Ziel | Bedingung`. Änderungen greifen nach einem Neustart
+des Add-ons.
 
 ## Einrichtung
 

@@ -182,6 +182,75 @@ def check_integrations():
     emit(0 if not failed else 2, "Home Assistant Integrationen", ["failed=%d" % len(failed)])
 
 
+def check_custom():
+    for raw in (opt("custom_services", []) or []):
+        raw = str(raw).strip()
+        if not raw:
+            continue
+        parts = [p.strip() for p in raw.split("|")]
+        name = parts[0] if parts else ""
+        label = "Home Assistant Eigene " + (name if name else "Zeile")
+        valid = len(parts) >= 3 and name != "" and parts[1] != ""
+        if not valid:
+            emit(3, label, None, "Format: Name | Ziel | Bedingung")
+            continue
+        target = parts[1]
+        conds = parts[2:]
+        if target.lower().startswith("url "):
+            url = target[4:].strip()
+            expect = 200
+            for c in conds:
+                low = c.lower()
+                if low.startswith("expect "):
+                    try:
+                        expect = int(c.split(" ", 1)[1])
+                    except Exception:
+                        expect = -1
+            code = 0
+            try:
+                with urllib.request.urlopen(url, timeout=4) as r:
+                    code = r.status
+            except urllib.error.HTTPError as e:
+                code = e.code
+            except Exception:
+                code = 0
+            emit(0 if code == expect else 2, label, ["code=%d" % code])
+            continue
+        st = entity(target)
+        if st is None:
+            emit(3, label, ["value=0"])
+            continue
+        state = str(st.get("state", ""))
+        for c in conds:
+            low = c.lower()
+            if low.startswith("state "):
+                want = c.split(" ", 1)[1].strip().lower()
+                bad = state.lower() == want
+                emit(0 if not bad else 2, label, ["ok=%d" % (0 if bad else 1)])
+                break
+            if low.startswith("above ") or low.startswith("below "):
+                mode = low.split(" ")[0]
+                vals = c.split(" ", 1)[1].replace("/", " ").split()
+                try:
+                    warn = float(vals[0])
+                    crit = float(vals[1]) if len(vals) > 1 else warn
+                except Exception:
+                    emit(3, label, None, "Bedingung unlesbar")
+                    break
+                try:
+                    v = float(state)
+                except Exception:
+                    emit(3, label, ["value=0"])
+                    break
+                if mode == "above":
+                    emit("P", label, ["value=%.2f;%s;%s" % (v, warn, crit)])
+                else:
+                    emit("P", label, ["value=%.2f;%s:;%s:" % (v, warn, crit)])
+                break
+        else:
+            emit(3, label, None, "Bedingung fehlt")
+
+
 def check_watch():
     for eid in (opt("watch_entities", []) or []):
         eid = str(eid)
@@ -212,6 +281,7 @@ def main():
         check_updates()
     if opt("enable_integrations", True):
         check_integrations()
+    check_custom()
     check_watch()
 
 

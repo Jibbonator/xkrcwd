@@ -1,9 +1,3 @@
-// monitor64-dockerproxy: read-only Docker-API über TLS für Monitor64.
-//
-// Der Proxy bekommt vom Supervisor die read-only Docker-API (docker_api: true), erzeugt
-// beim ersten Start CA, Server- und Client-Zertifikat, verlangt ein Client-Zertifikat und
-// lässt nur GET/HEAD auf eine feste Pfadliste zu. Beim Start stehen Zugangsdaten und
-// SHA-256-Fingerabdruck des Server-Zertifikats im Log.
 package main
 
 import (
@@ -36,7 +30,6 @@ import (
 	"time"
 )
 
-// erlaubte Pfade: was das Monitor64-Modul Docker abfragt. Alles andere wird abgewiesen.
 var allowedPaths = []*regexp.Regexp{
 	regexp.MustCompile(`^/_ping$`),
 	regexp.MustCompile(`^/version$`),
@@ -127,7 +120,6 @@ func main() {
 	}
 }
 
-// filter lässt nur read-only Anfragen auf die erlaubte Pfadliste durch.
 func filter(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -145,8 +137,6 @@ func filter(next http.Handler) http.Handler {
 	})
 }
 
-// ensureCerts lädt die Zertifikate aus dir oder erzeugt sie beim ersten Start.
-// Vorhandene Dateien werden nie ersetzt: ein neues Zertifikat würde den Pin brechen.
 func ensureCerts(dir string) (*certs, error) {
 	c := &certs{dir: dir}
 
@@ -199,8 +189,6 @@ func ensureCerts(dir string) (*certs, error) {
 	return c, nil
 }
 
-// loadOrCreate nutzt die vorhandene Datei oder ruft make auf, das Zertifikat und
-// Schlüssel schreibt.
 func loadOrCreate(path string, make func() ([]byte, []byte, error)) ([]byte, error) {
 	if b, err := os.ReadFile(path); err == nil {
 		return b, nil

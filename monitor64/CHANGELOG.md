@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.11-2
+
+- Mitgelieferte Home-Assistant-Checks: Erreichbarkeit des Core (`/core/api/`), Alter und
+  Zustand des letzten automatischen Backups, Größe der Recorder-DB, verfügbare Updates
+  (`update.*`-Entitäten) und Integrationen in Fehlerzuständen (Core-Websocket
+  `config_entries/get`).
+- Optionen `enable_checks`, `enable_api`, `enable_backup_last`, `enable_backup_state`,
+  `enable_db`, `enable_updates`, `enable_integrations`; Entitäten
+  `entity_backup_last`, `entity_backup_state`, `entity_db_size`; Schwellen
+  `backup_warn_h`, `backup_crit_h`, `db_warn_gb`, `db_crit_gb`; Ausnahmen über
+  `ignore_integrations` und `watch_entities`.
+- `local_scripts` ergänzt die mitgelieferten Checks, statt sie zu ersetzen; `run.sh`
+  kopiert beide in den Ordner des Agenten.
+- Image: `python3` und `python3-websocket` für den Websocket-Aufruf.
+
 ## 0.1.11-1
 
 - Agent auf 0.1.11 (Upstream 1.7.10): eingebetteten Quellbaum auf den Tag-Stand

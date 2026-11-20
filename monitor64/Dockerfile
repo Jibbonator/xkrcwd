@@ -1,8 +1,3 @@
-# Monitor64-Add-on: Agent aus dem gepatchten Quellbaum, Proxy aus dem Quellcode.
-# Bewusst kein BUILD_FROM und kein S6-Overlay: das Add-on braucht host_pid, und S6
-# vertraegt sich damit nicht. Debian statt Alpine, weil systemctl fuer den systemd-Status
-# des Hosts gebraucht wird (Alpine hat kein systemd).
-
 FROM golang:1.27-alpine AS agentbuild
 WORKDIR /src
 COPY agent-src/go.mod agent-src/go.sum ./
@@ -28,13 +23,14 @@ LABEL io.hass.version="${BUILD_VERSION}" \
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates jq smartmontools systemd \
+      ca-certificates jq python3 python3-websocket smartmontools systemd \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=agentbuild /out/monitor64-agent /usr/local/bin/monitor64-agent
 COPY --from=proxybuild /out/monitor64-proxy /usr/local/bin/monitor64-proxy
+COPY checks/ /usr/local/share/monitor64/checks/
 COPY run.sh /run.sh
-RUN chmod 0755 /run.sh
+RUN chmod 0755 /run.sh /usr/local/share/monitor64/checks/*
 
 ENTRYPOINT ["/run.sh"]
 

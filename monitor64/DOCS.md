@@ -84,9 +84,6 @@ und erscheinen als eigene Dienste in Monitor64.
 | `db_warn_gb` | `8` | Warnung ab dieser DB-Größe in GB. |
 | `db_crit_gb` | `12` | Kritisch ab dieser DB-Größe in GB. |
 
-Der Integrations-Check nutzt den Core-Websocket (`config_entries/get`), weil die REST-API
-diesen Zustand nicht liefert; dafür ist `python3-websocket` im Image.
-
 ### Eigene Dienste (`custom_services`)
 
 Eine Zeile pro Dienst, Felder durch `|` getrennt, Leerzeichen sind egal. Der Dienst heißt
@@ -119,16 +116,12 @@ Was nicht geht:
 
 Fehlerverhalten: fehlt die Entität oder ist die Zeile unlesbar, meldet der Dienst Status 3
 (`unknown`) mit dem Hinweis `Format: Name | Ziel | Bedingung`. Änderungen greifen nach
-einem Neustart des Add-ons. Im Add-on-Panel gibt es keinen Hilfetext; Beispiele stehen nur
-hier.
+einem Neustart des Add-ons.
 
 Wichtig zur Meldung: Status 3 zählt in Monitor64 wie eine Warnung. In einer aktiven
 Ruhezeit (Monitor64 → Benachrichtigung, z. B. 23:00–06:00) wird sie deshalb nicht
 verschickt, solange `crit_in_quiet` aus ist. Das Problem wird trotzdem geöffnet und steht
 in Monitor64.
-
-Zertifikate des Docker-Proxys liegen in `/data/proxy`. Der Fingerabdruck bleibt über
-Neustarts gleich, weil sie nur beim ersten Start erzeugt werden.
 
 ## Was das Add-on sieht
 
@@ -153,14 +146,10 @@ Neustarts gleich, weil sie nur beim ersten Start erzeugt werden.
 - Ohne gesetzten Fingerabdruck braucht die Docker-Verbindung eine vertraute CA und einen
   passenden Hostnamen; das Add-on erzeugt eine eigene CA, die Monitor64 nur mit
   hinterlegtem Pin akzeptiert.
-- Docker-Container und alle anderen Dienste müssen in Monitor64 übernommen und auf
-  „melden“ gestellt werden — sonst nur Anzeige, kein Alarm.
 
 ## Fehlersuche
 
 | Symptom | Ursache |
 |---|---|
-| HA-Checks melden Status 3 „Token fehlt“ | `homeassistant_api` fehlt in `config.yaml` oder die Datei `/data/monitor64-agent/ha.env` wurde nicht geschrieben (Add-on neu starten). |
-| HA-Checks antworten mit 401 | Berechtigung `homeassistant_api` fehlt im laufenden Container (Add-on aktualisieren). |
 | Keine Dienste „Eigene Skripte“ in Monitor64 | `enable_checks` ist `false`, oder die Dienste wurden noch nicht übernommen. |
 | Docker-Proxy verbindet nicht | Fingerabdruck nicht gepinnt bzw. Zugangsdaten ohne das JSON hinter `credentials=` eingetragen. |

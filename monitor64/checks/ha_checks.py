@@ -8,11 +8,25 @@ import urllib.request
 BASE = os.environ.get("SUPERVISOR_URL", "http://supervisor")
 TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
 OPTS = "/data/options.json"
+TOKEN_FILE = "/data/monitor64-agent/ha.env"
 
 try:
     import websocket
 except ImportError:
     websocket = None
+
+
+def token():
+    if TOKEN:
+        return TOKEN
+    try:
+        with open(TOKEN_FILE) as f:
+            for line in f:
+                if line.startswith("SUPERVISOR_TOKEN="):
+                    return line.split("=", 1)[1].strip()
+    except Exception:
+        return ""
+    return ""
 
 
 def options():
@@ -36,7 +50,7 @@ def opt(name, default):
 
 
 def http(path, timeout=4):
-    req = urllib.request.Request(BASE + path, headers={"Authorization": "Bearer " + TOKEN})
+    req = urllib.request.Request(BASE + path, headers={"Authorization": "Bearer " + token()})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status, r.read().decode("utf-8", "replace")
@@ -127,14 +141,14 @@ def check_updates():
 
 
 def ws_entries():
-    if websocket is None or not TOKEN:
+    if websocket is None or not token():
         return None
     url = BASE.replace("https://", "wss://").replace("http://", "ws://") + "/core/websocket"
     try:
         ws = websocket.create_connection(url, timeout=8)
         msg = json.loads(ws.recv())
         if msg.get("type") == "auth_required":
-            ws.send(json.dumps({"type": "auth", "access_token": TOKEN}))
+            ws.send(json.dumps({"type": "auth", "access_token": token()}))
             msg = json.loads(ws.recv())
         if msg.get("type") != "auth_ok":
             ws.close()
@@ -183,7 +197,7 @@ def check_watch():
 
 
 def main():
-    if not TOKEN:
+    if not token():
         emit(3, "Home Assistant Token", None, "SUPERVISOR_TOKEN fehlt")
         return
     if opt("enable_api", True):

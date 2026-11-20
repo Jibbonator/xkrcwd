@@ -35,6 +35,9 @@ if [ -r "$OPTS" ]; then
 	CHECKS=$(jq -r 'if has("enable_checks") then (.enable_checks | tostring) else "true" end' "$OPTS" 2>/dev/null || echo true)
 fi
 
+printf 'SUPERVISOR_TOKEN=%s\n' "${SUPERVISOR_TOKEN:-}" > "$DATA/ha.env"
+chmod 0600 "$DATA/ha.env"
+
 rm -rf "$DATA/local.d"
 mkdir -p "$DATA/local.d"
 if [ "$CHECKS" = "true" ]; then

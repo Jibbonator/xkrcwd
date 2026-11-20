@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.11-4
+
+- Token-Weitergabe korrigiert: Der Agent startet eigene Skripte mit gefilterter
+  Umgebung, `SUPERVISOR_TOKEN` kam dort nie an. `run.sh` schreibt ihn jetzt nach
+  `/data/monitor64-agent/ha.env`, das Skript liest ihn von dort.
+
+## 0.1.11-3
+
+- `homeassistant_api: true`: ohne diese Berechtigung antwortet der Supervisor auf
+  `/core/api/` mit 401, alle HA-Checks liefen ins Leere.
+
 ## 0.1.11-2
 
 - Mitgelieferte Home-Assistant-Checks: Erreichbarkeit des Core (`/core/api/`), Alter und

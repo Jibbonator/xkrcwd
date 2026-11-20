@@ -1,5 +1,5 @@
 name: Monitor64
-version: "0.1.11-2"
+version: "0.1.11-4"
 slug: monitor64
 description: Monitor64-Agent (6465), read-only Docker-Proxy (2376) und Home-Assistant-Checks
 arch:
@@ -16,6 +16,7 @@ privileged:
   - SYS_RAWIO
   - SYS_ADMIN
 docker_api: true
+homeassistant_api: true
 map:
   - config:ro
 options:

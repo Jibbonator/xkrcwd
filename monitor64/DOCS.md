@@ -10,6 +10,8 @@ Assistant selbst (Erreichbarkeit, Backups, Recorder-DB, Updates, Integrationen).
 - **Schutzmodus aus** (Einstellungen des Add-ons): nötig für `full_access`, `host_pid` und
   `docker_api`.
 - Der HA-Host ist über IP erreichbar; Monitor64 verbindet sich über die IP-Adresse.
+- Das Add-on nutzt die Berechtigungen `homeassistant_api` (HA-Checks) und `docker_api`
+  (Docker-Proxy); beide stehen in `config.yaml`.
 
 ## Optionen
 

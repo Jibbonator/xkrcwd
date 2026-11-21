@@ -1,5 +1,5 @@
 name: Monitor64
-version: "0.1.11-5"
+version: "0.1.11-6"
 slug: monitor64
 description: Monitor64-Agent (6465), read-only Docker-Proxy (2376) und Home-Assistant-Checks
 arch:
@@ -27,7 +27,7 @@ options:
   agent_port: 6465
   agent_root: ""
   enable_checks: true
-  enable_api: true
+  grace_min: 10
   enable_backup_last: true
   enable_backup_state: true
   enable_db: true
@@ -52,7 +52,7 @@ schema:
   agent_port: int
   agent_root: str
   enable_checks: bool
-  enable_api: bool
+  grace_min: int(0,1440)
   enable_backup_last: bool
   enable_backup_state: bool
   enable_db: bool

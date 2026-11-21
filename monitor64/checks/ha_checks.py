@@ -49,6 +49,25 @@ def opt(name, default):
     return v
 
 
+def grace_min():
+    try:
+        return float(opt("grace_min", 10))
+    except Exception:
+        return 10.0
+
+
+def in_grace(st):
+    # Solange eine Entitaet kuerzer als grace_min auf unavailable/unknown steht, noch kein Alarm.
+    try:
+        ts = datetime.datetime.fromisoformat(str(st.get("last_changed", "")).replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=datetime.timezone.utc)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        return (now - ts.astimezone(datetime.timezone.utc)).total_seconds() < grace_min() * 60.0
+    except Exception:
+        return False
+
+
 def http(path, timeout=4):
     req = urllib.request.Request(BASE + path, headers={"Authorization": "Bearer " + token()})
     try:
@@ -77,26 +96,28 @@ def emit(status, name, metrics=None, text=None):
     print(line)
 
 
-def check_api():
-    code, body = http("/core/api/")
-    ok = code == 200 and "API running" in body
-    emit(0 if ok else 2, "Home Assistant API", ["ok=%d" % (1 if ok else 0)])
-
-
 def check_backup_last():
     warn = opt("backup_warn_h", 48)
     crit = opt("backup_crit_h", 96)
     st = entity(str(opt("entity_backup_last", "sensor.backup_letztes_erfolgreiches_automatisches_backup")))
+    if st is None:
+        return
+    state = str(st.get("state", ""))
+    if state in ("unavailable", "unknown"):
+        if in_grace(st):
+            emit(0, "Home Assistant Backup Alter", None)
+        else:
+            emit(3, "Home Assistant Backup Alter", ["age=0"])
+        return
     age = None
-    if st is not None:
-        try:
-            ts = datetime.datetime.fromisoformat(str(st.get("state", "")).replace("Z", "+00:00"))
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=datetime.timezone.utc)
-            now = datetime.datetime.now(datetime.timezone.utc)
-            age = (now - ts.astimezone(datetime.timezone.utc)).total_seconds() / 3600.0
-        except Exception:
-            age = None
+    try:
+        ts = datetime.datetime.fromisoformat(state.replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=datetime.timezone.utc)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        age = (now - ts.astimezone(datetime.timezone.utc)).total_seconds() / 3600.0
+    except Exception:
+        age = None
     if age is None:
         emit(3, "Home Assistant Backup Alter", ["age=0"])
     else:
@@ -106,10 +127,16 @@ def check_backup_last():
 def check_backup_state():
     st = entity(str(opt("entity_backup_state", "sensor.backup_backup_manager_zustand")))
     if st is None:
-        emit(3, "Home Assistant Backup Zustand", ["busy=0"])
-    else:
-        busy = 0 if str(st.get("state", "")) == "idle" else 1
-        emit(0 if busy == 0 else 1, "Home Assistant Backup Zustand", ["busy=%d" % busy])
+        return
+    state = str(st.get("state", ""))
+    if state in ("unavailable", "unknown"):
+        if in_grace(st):
+            emit(0, "Home Assistant Backup Zustand", None)
+        else:
+            emit(3, "Home Assistant Backup Zustand", ["busy=0"])
+        return
+    busy = 0 if state == "idle" else 1
+    emit(0 if busy == 0 else 1, "Home Assistant Backup Zustand", ["busy=%d" % busy])
 
 
 def check_db():
@@ -117,10 +144,16 @@ def check_db():
     crit = opt("db_crit_gb", 12)
     st = entity(str(opt("entity_db_size", "sensor.db_size")))
     if st is None:
-        emit(3, "Home Assistant DB Groesse GB", ["gb=0"])
+        return
+    state = str(st.get("state", ""))
+    if state in ("unavailable", "unknown"):
+        if in_grace(st):
+            emit(0, "Home Assistant DB Groesse GB", None)
+        else:
+            emit(3, "Home Assistant DB Groesse GB", ["gb=0"])
         return
     try:
-        kb = float(st.get("state"))
+        kb = float(state)
     except Exception:
         emit(3, "Home Assistant DB Groesse GB", ["gb=0"])
         return
@@ -166,7 +199,6 @@ def ws_entries():
 def check_integrations():
     entries = ws_entries()
     if entries is None:
-        emit(3, "Home Assistant Integrationen", ["failed=0"])
         return
     ignore = set(str(x).lower() for x in (opt("ignore_integrations", []) or []))
     failed = []
@@ -218,7 +250,6 @@ def check_custom():
             continue
         st = entity(target)
         if st is None:
-            emit(3, label, ["value=0"])
             continue
         state = str(st.get("state", ""))
         for c in conds:
@@ -236,6 +267,12 @@ def check_custom():
                     crit = float(vals[1]) if len(vals) > 1 else warn
                 except Exception:
                     emit(3, label, None, "Bedingung unlesbar")
+                    break
+                if state.lower() in ("unavailable", "unknown"):
+                    if in_grace(st):
+                        emit(0, label, None)
+                    else:
+                        emit(3, label, ["value=0"])
                     break
                 try:
                     v = float(state)
@@ -259,9 +296,11 @@ def check_watch():
         st = entity(eid)
         name = "Home Assistant Entitaet " + eid
         if st is None:
-            emit(3, name, ["ok=0"])
             continue
         bad = str(st.get("state", "")) in ("unavailable", "unknown")
+        if bad and in_grace(st):
+            emit(0, name, None)
+            continue
         emit(0 if not bad else 2, name, ["ok=%d" % (0 if bad else 1)])
 
 
@@ -269,8 +308,6 @@ def main():
     if not token():
         emit(3, "Home Assistant Token", None, "SUPERVISOR_TOKEN fehlt")
         return
-    if opt("enable_api", True):
-        check_api()
     if opt("enable_backup_last", True):
         check_backup_last()
     if opt("enable_backup_state", True):

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.11-6
+
+- Check `Home Assistant API` entfernt; der Container läuft über den Docker-Zugang
+  (`ctr:homeassistant`).
+- Neue Option `grace_min` (Minuten): `unavailable`/`unknown` wird erst nach dieser Zeit
+  als Problem gemeldet.
+- Fehlende Entität oder nicht antwortende Supervisor-API: keine Zeile mehr statt sofort
+  Status 3; Monitor64 hält den letzten Stand drei Intervalle.
+
 ## 0.1.11-5
 
 - Neue Option `custom_services`: eigene Dienste als Zeilen `Name | Ziel | Bedingung`

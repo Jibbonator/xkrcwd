@@ -67,7 +67,7 @@ und erscheinen als eigene Dienste in Monitor64.
 | Option | Standard | Bedeutung |
 |---|---|---|
 | `enable_checks` | `true` | Alle mitgelieferten Checks ab (`false` = keine Dienste). |
-| `enable_api` | `true` | Antwortet der HA-Core auf `/core/api/`? |
+| `grace_min` | `10` | Wartezeit in Minuten, bevor `unavailable`/`unknown` als Problem gemeldet wird. |
 | `enable_backup_last` | `true` | Alter des letzten erfolgreichen automatischen Backups. |
 | `enable_backup_state` | `true` | Zustand des Backup-Managers (Warnung, wenn nicht `idle`). |
 | `enable_db` | `true` | Größe der Recorder-Datenbank. |
@@ -114,9 +114,11 @@ Was nicht geht:
 - Attribute, Formatierungen, eigene Tokens für die URL.
 - Zustände mit `|` im Wert.
 
-Fehlerverhalten: fehlt die Entität oder ist die Zeile unlesbar, meldet der Dienst Status 3
-(`unknown`) mit dem Hinweis `Format: Name | Ziel | Bedingung`. Änderungen greifen nach
-einem Neustart des Add-ons.
+Fehlerverhalten: bei `above`/`below` meldet eine Entität auf `unavailable`/`unknown` bis
+`grace_min` Status 0 und danach Status 3 (`unknown`). Fehlt die Entität oder antwortet die
+Supervisor-API nicht, kommt keine Zeile; Monitor64 hält den letzten Stand drei Intervalle.
+Eine unlesbare Zeile meldet Status 3 mit dem Hinweis `Format: Name | Ziel | Bedingung`.
+Änderungen greifen nach einem Neustart des Add-ons.
 
 Wichtig zur Meldung: Status 3 zählt in Monitor64 wie eine Warnung. In einer aktiven
 Ruhezeit (Monitor64 → Benachrichtigung, z. B. 23:00–06:00) wird sie deshalb nicht
@@ -132,9 +134,9 @@ in Monitor64.
   ausschließlich `GET`/`HEAD` auf `/_ping`, `/version`, `/info`, `/containers/json`,
   `/containers/<id>/json` und `/containers/<id>/stats`; alles andere wird mit 403
   abgewiesen.
-- **Home-Assistant-Checks:** lesend über `SUPERVISOR_TOKEN` — `GET /core/api/` und
-  `GET /core/api/states/<entity>` für Erreichbarkeit, Backups, DB-Größe und Updates, dazu
-  der Websocket-Aufruf `config_entries/get` für Integrationszustände. Keine
+- **Home-Assistant-Checks:** lesend über `SUPERVISOR_TOKEN` — `GET /core/api/states/<entity>`
+  für Backups, DB-Größe, eigene Dienste und `watch_entities`, `GET /core/api/states` für
+  Updates, dazu der Websocket-Aufruf `config_entries/get` für Integrationszustände. Keine
   Schreibzugriffe, kein Zugriff auf die Datenbankdatei.
 
 ## Grenzen
